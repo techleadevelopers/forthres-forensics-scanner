@@ -156,7 +156,11 @@ pub async fn scan_contract(
     let forensics = ForensicsEngine::new(config.anvil_url.clone(), config.chain_id);
 
     emit(log_event(
-        format!("Starting Rust scanner for {}", request.contract_address),
+        format!(
+            "Starting Rust scanner for {} on {}",
+            request.contract_address,
+            config.chain.as_str()
+        ),
         "info",
     ));
     emit(log_event(
@@ -322,6 +326,7 @@ pub async fn scan_contract(
     let kind = classify_kind(&analysis, !dangerous_matches.is_empty());
     let report = VulnerabilityReport {
         id: uuid::Uuid::new_v4().to_string(),
+        chain: config.chain.as_str().to_string(),
         contract_address: request.contract_address.clone(),
         tx_hash: format!("manual-scan:{}", uuid::Uuid::new_v4()),
         severity,
@@ -361,6 +366,7 @@ pub async fn collect_status(config: &ScannerConfig) -> Result<ScannerStatusSnaps
     let anvil_connected = is_anvil_connected(config).await;
 
     Ok(ScannerStatusSnapshot {
+        chain: config.chain.as_str().to_string(),
         running: endpoints.iter().any(|endpoint| endpoint.is_healthy),
         chain_id: config.chain_id,
         endpoint_count: endpoints.len(),
