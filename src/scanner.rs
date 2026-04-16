@@ -54,9 +54,6 @@ pub enum ScanEvent {
     Complete {
         report: VulnerabilityReport,
     },
-    Error {
-        message: String,
-    },
 }
 
 pub struct ScanStream;
@@ -399,7 +396,7 @@ pub async fn collect_endpoints(config: &ScannerConfig) -> Result<Vec<EndpointHea
 }
 
 async fn probe_ws_endpoint(lb: &LoadBalancer, endpoint: &str) {
-    let request = WsConnectionRequest::new(endpoint.to_string());
+    let request = WsConnectionRequest::new();
     match timeout(Duration::from_secs(8), connect_async(endpoint)).await {
         Ok(Ok((mut stream, _))) => {
             lb.record_success(endpoint, request.elapsed_ms());
