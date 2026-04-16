@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use futures_util::SinkExt;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
