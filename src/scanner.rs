@@ -176,7 +176,7 @@ pub async fn scan_contract(
     let (bytecode_hex, rpc_source): (String, String) = rpc
         .call(
             "eth_getCode",
-            json!([request.contract_address, "latest"]),
+            json!([request.contract_address.as_str(), "latest"]),
         )
         .await?;
 
@@ -240,7 +240,7 @@ pub async fn scan_contract(
                     "eth_call",
                     json!([
                         {
-                            "to": request.contract_address,
+                            "to": request.contract_address.as_str(),
                             "data": selector,
                         },
                         "latest"
