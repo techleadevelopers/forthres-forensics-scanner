@@ -9,7 +9,6 @@ use crate::bytecode::BytecodeAnalysis;
 /// Result of forensic fork validation
 #[derive(Debug, Clone)]
 pub struct ForensicResult {
-    pub success: bool,
     pub state_delta: String,
     pub unauthorized_access: bool,
     pub balance_drained: bool,
@@ -37,15 +36,13 @@ struct JsonRpcResponse {
 /// ZERO impact on mainnet — all operations are strictly local.
 pub struct ForensicsEngine {
     anvil_url: String,
-    chain_id: u64,
     http_client: Client,
 }
 
 impl ForensicsEngine {
-    pub fn new(anvil_url: String, chain_id: u64) -> Self {
+    pub fn new(anvil_url: String, _chain_id: u64) -> Self {
         Self {
             anvil_url,
-            chain_id,
             http_client: Client::new(),
         }
     }
@@ -237,7 +234,6 @@ impl ForensicsEngine {
         };
 
         Ok(Some(ForensicResult {
-            success: true,
             state_delta,
             unauthorized_access,
             balance_drained,
