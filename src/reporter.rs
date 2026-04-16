@@ -59,6 +59,7 @@ impl std::fmt::Display for VulnerabilityKind {
 #[serde(rename_all = "camelCase")]
 pub struct VulnerabilityReport {
     pub id: String,
+    pub chain: String,
     pub contract_address: String,
     pub tx_hash: String,
     pub severity: Severity,
@@ -75,6 +76,7 @@ pub struct VulnerabilityReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannerStatusSnapshot {
+    pub chain: String,
     pub running: bool,
     pub chain_id: u64,
     pub endpoint_count: usize,
@@ -156,8 +158,9 @@ impl VulnerabilityReport {
         };
 
         format!(
-            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n",
+            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Chain: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n",
             self.id,
+            self.chain,
             self.contract_address,
             self.tx_hash,
             self.severity,
