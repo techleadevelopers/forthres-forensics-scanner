@@ -5,6 +5,7 @@ use chrono::Utc;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
 use crate::bytecode::{BytecodeAnalysis, BytecodeScanner, PatternSeverity};
@@ -399,12 +400,12 @@ pub async fn collect_endpoints(config: &ScannerConfig) -> Result<Vec<EndpointHea
 
 async fn probe_ws_endpoint(lb: &LoadBalancer, endpoint: &str) {
     let request = WsConnectionRequest::new(endpoint.to_string());
-    match connect_async(endpoint).await {
-        Ok((mut stream, _)) => {
+    match timeout(Duration::from_secs(8), connect_async(endpoint)).await {
+        Ok(Ok((mut stream, _))) => {
             lb.record_success(endpoint, request.elapsed_ms());
             let _ = stream.close(None).await;
         }
-        Err(_) => lb.record_failure(endpoint),
+        Ok(Err(_)) | Err(_) => lb.record_failure(endpoint),
     }
 }
 
