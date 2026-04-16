@@ -34,8 +34,8 @@ enum Command {
         contract_address: String,
         #[arg(long, value_enum, default_value_t = ScanModeArg::Fast)]
         mode: ScanModeArg,
-        #[arg(long, default_value_t = true)]
-        simulation: bool,
+        #[arg(long, value_enum, default_value_t = SimulationArg::True)]
+        simulation: SimulationArg,
         #[arg(long, value_enum, default_value_t = ForkModeArg::Auto)]
         fork: ForkModeArg,
     },
@@ -56,6 +56,12 @@ enum ForkModeArg {
     Off,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SimulationArg {
+    True,
+    False,
+}
+
 impl From<ScanModeArg> for ScanMode {
     fn from(value: ScanModeArg) -> Self {
         match value {
@@ -72,6 +78,12 @@ impl From<ForkModeArg> for ForkMode {
             ForkModeArg::Force => ForkMode::Force,
             ForkModeArg::Off => ForkMode::Off,
         }
+    }
+}
+
+impl From<SimulationArg> for bool {
+    fn from(value: SimulationArg) -> Self {
+        matches!(value, SimulationArg::True)
     }
 }
 
@@ -137,7 +149,7 @@ async fn main() -> Result<()> {
             let request = ScanRequest {
                 contract_address,
                 mode: mode.into(),
-                simulation,
+                simulation: simulation.into(),
                 fork: fork.into(),
             };
 
