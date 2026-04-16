@@ -1,7 +1,25 @@
 use anyhow::Result;
 
+#[derive(Debug, Clone, Copy)]
+pub enum ScannerChain {
+    Ethereum,
+    Arbitrum,
+    Bnb,
+}
+
+impl ScannerChain {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScannerChain::Ethereum => "ethereum",
+            ScannerChain::Arbitrum => "arbitrum",
+            ScannerChain::Bnb => "bnb",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
+    pub chain: ScannerChain,
     pub chain_id: u64,
     pub anvil_url: String,
     pub output_dir: String,
@@ -11,6 +29,12 @@ pub struct ScannerConfig {
 
 impl ScannerConfig {
     pub fn from_env() -> Result<Self> {
+        let chain = parse_chain(
+            std::env::var("SCANNER_CHAIN")
+                .ok()
+                .as_deref()
+                .unwrap_or("ethereum"),
+        )?;
         let chain_id = std::env::var("SCANNER_CHAIN_ID")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -30,12 +54,22 @@ impl ScannerConfig {
         let ws_endpoints = parse_endpoints("RPC_WS_ENDPOINTS")?;
 
         Ok(Self {
+            chain,
             chain_id,
             anvil_url,
             output_dir,
             http_endpoints,
             ws_endpoints,
         })
+    }
+}
+
+fn parse_chain(value: &str) -> Result<ScannerChain> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ethereum" => Ok(ScannerChain::Ethereum),
+        "arbitrum" => Ok(ScannerChain::Arbitrum),
+        "bnb" => Ok(ScannerChain::Bnb),
+        other => anyhow::bail!("Unsupported SCANNER_CHAIN: {other}"),
     }
 }
 
