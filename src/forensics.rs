@@ -34,6 +34,7 @@ struct JsonRpcResponse {
 /// Deep forensic validation engine using local Anvil fork.
 /// Simulates unauthorized interactions in an ephemeral fork environment.
 /// ZERO impact on mainnet — all operations are strictly local.
+#[derive(Clone)]
 pub struct ForensicsEngine {
     anvil_url: String,
     http_client: Client,
