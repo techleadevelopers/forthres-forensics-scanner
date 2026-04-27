@@ -9,6 +9,7 @@ mod bytecode;
 mod config;
 mod forensics;
 mod load_balancer;
+mod offensive;
 mod reporter;
 mod scanner;
 
