@@ -41,6 +41,7 @@ pub struct BytecodeAnalysis {
     pub has_callcode: bool,
     pub has_create2: bool,
     pub risk_score: u32,
+    pub bytecode: Option<Vec<u8>>,  // ← CAMPO ADICIONADO
 }
 
 impl BytecodeAnalysis {
@@ -194,6 +195,7 @@ impl BytecodeScanner {
             has_callcode,
             has_create2,
             risk_score,
+            bytecode: Some(bytecode.to_vec()),  // ← LINHA ADICIONADA
         }
     }
 
