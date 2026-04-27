@@ -34,6 +34,12 @@ impl std::fmt::Display for Severity {
 pub enum VulnerabilityKind {
     UnprotectedSelfDestruct,
     DangerousDelegatecall,
+    UpgradeableProxy,
+    AdminControlledContract,
+    GenericContract,
+    ExploitConfirmed,
+    ExploitPossible,
+    HighRiskPattern,
     MissingAccessControl,
     ReentrancyRisk,
     PrivilegedCallcode,
@@ -41,11 +47,35 @@ pub enum VulnerabilityKind {
     Create2Exploit,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BehavioralKind {
+    Benign,
+    ExecutorContract,
+    MaliciousInfrastructure,
+}
+
+impl std::fmt::Display for BehavioralKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BehavioralKind::Benign => write!(f, "BENIGN"),
+            BehavioralKind::ExecutorContract => write!(f, "EXECUTOR_CONTRACT"),
+            BehavioralKind::MaliciousInfrastructure => write!(f, "MALICIOUS_INFRASTRUCTURE"),
+        }
+    }
+}
+
 impl std::fmt::Display for VulnerabilityKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VulnerabilityKind::UnprotectedSelfDestruct => write!(f, "UNPROTECTED_SELFDESTRUCT"),
             VulnerabilityKind::DangerousDelegatecall => write!(f, "DANGEROUS_DELEGATECALL"),
+            VulnerabilityKind::UpgradeableProxy => write!(f, "UPGRADEABLE_PROXY"),
+            VulnerabilityKind::AdminControlledContract => write!(f, "ADMIN_CONTROLLED_CONTRACT"),
+            VulnerabilityKind::GenericContract => write!(f, "GENERIC_CONTRACT"),
+            VulnerabilityKind::ExploitConfirmed => write!(f, "EXPLOIT_CONFIRMED"),
+            VulnerabilityKind::ExploitPossible => write!(f, "EXPLOIT_POSSIBLE"),
+            VulnerabilityKind::HighRiskPattern => write!(f, "HIGH_RISK_PATTERN"),
             VulnerabilityKind::MissingAccessControl => write!(f, "MISSING_ACCESS_CONTROL"),
             VulnerabilityKind::ReentrancyRisk => write!(f, "REENTRANCY_RISK"),
             VulnerabilityKind::PrivilegedCallcode => write!(f, "PRIVILEGED_CALLCODE"),
@@ -54,6 +84,68 @@ impl std::fmt::Display for VulnerabilityKind {
         }
     }
 }
+
+// ============================================================
+// NOVAS STRUCTS OFENSIVAS
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExploitPathReport {
+    pub entry_selector: String,
+    pub probability: f64,
+    pub economic_value_eth: f64,
+    pub required_conditions: Vec<String>,
+    pub state_changes: Vec<String>,
+    pub poc_calldata: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MevOpportunityReport {
+    pub mev_type: String,
+    pub estimated_profit_eth: f64,
+    pub competition_score: f64,
+    pub suggested_tip_bps: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyReport {
+    pub proxy_type: Option<String>,
+    pub implementation: Option<String>,
+    pub admin: Option<String>,
+    pub beacon: Option<String>,
+    pub is_access_controlled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceReport {
+    pub fork_validated: bool,
+    pub exploit_path: bool,
+    pub simulation_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValueFlowReport {
+    pub can_move_funds: bool,
+    pub role: String,
+    pub risk_surface: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehavioralRiskReport {
+    pub kind: BehavioralKind,
+    pub score: f64,
+    pub rationale: String,
+}
+
+// ============================================================
+// VULNERABILITY REPORT COM CAMPOS OFENSIVOS
+// ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +163,16 @@ pub struct VulnerabilityReport {
     pub timestamp: DateTime<Utc>,
     pub fork_validated: bool,
     pub confidence_score: u32,
+    pub proxy: Option<ProxyReport>,
+    pub evidence: EvidenceReport,
+    pub value_flow: ValueFlowReport,
+    pub behavioral_risk: BehavioralRiskReport,
+    // NOVOS CAMPOS OFENSIVOS
+    pub exploit_paths: Vec<ExploitPathReport>,
+    pub mev_opportunities: Vec<MevOpportunityReport>,
+    pub exploitation_probability: f64,
+    pub risk_adjusted_value: f64,
+    pub recommendation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,8 +259,105 @@ impl VulnerabilityReport {
                 .join("\n")
         };
 
+        let proxy_section = if let Some(proxy) = &self.proxy {
+            format!(
+                "\n## Proxy Metadata\n\n- Proxy Type: `{}`\n- Implementation: `{}`\n- Admin: `{}`\n- Beacon: `{}`\n- Access Controlled: `{}`\n",
+                proxy.proxy_type.as_deref().unwrap_or("not detected"),
+                proxy.implementation.as_deref().unwrap_or("not detected"),
+                proxy.admin.as_deref().unwrap_or("not detected"),
+                proxy.beacon.as_deref().unwrap_or("not detected"),
+                if proxy.is_access_controlled { "yes" } else { "no" }
+            )
+        } else {
+            String::new()
+        };
+
+        let evidence_section = format!(
+            "\n## Evidence\n\n- Fork Validated: `{}`\n- Exploit Path: `{}`\n- Simulation Only: `{}`\n",
+            if self.evidence.fork_validated { "yes" } else { "no" },
+            if self.evidence.exploit_path { "yes" } else { "no" },
+            if self.evidence.simulation_only { "yes" } else { "no" }
+        );
+
+        let value_flow_section = format!(
+            "\n## Value Flow\n\n- Can Move Funds: `{}`\n- Role: `{}`\n- Risk Surface: `{}`\n",
+            if self.value_flow.can_move_funds { "yes" } else { "no" },
+            self.value_flow.role,
+            self.value_flow.risk_surface
+        );
+
+        let behavioral_section = format!(
+            "\n## Behavioral Risk\n\n- Kind: `{}`\n- Score: `{:.2}`\n- Rationale: `{}`\n",
+            self.behavioral_risk.kind,
+            self.behavioral_risk.score,
+            self.behavioral_risk.rationale
+        );
+
+        // NOVA SEÇÃO: Exploit Paths
+        let exploit_paths_section = if self.exploit_paths.is_empty() {
+            "No exploit paths identified.\n".to_string()
+        } else {
+            let mut section = String::from("\n## Exploit Paths\n\n");
+            for (i, path) in self.exploit_paths.iter().enumerate() {
+                section.push_str(&format!(
+                    "### Path {}\n\n- **Entry Selector:** `{}`\n- **Probability:** `{:.2}%`\n- **Economic Value:** `{:.6} ETH`\n- **Required Conditions:**\n",
+                    i + 1,
+                    path.entry_selector,
+                    path.probability * 100.0,
+                    path.economic_value_eth
+                ));
+                
+                if path.required_conditions.is_empty() {
+                    section.push_str("  - none\n");
+                } else {
+                    for cond in &path.required_conditions {
+                        section.push_str(&format!("  - `{}`\n", cond));
+                    }
+                }
+                
+                section.push_str("\n- **State Changes:**\n");
+                if path.state_changes.is_empty() {
+                    section.push_str("  - none\n");
+                } else {
+                    for change in &path.state_changes {
+                        section.push_str(&format!("  - `{}`\n", change));
+                    }
+                }
+                
+                section.push_str(&format!("\n- **PoC Calldata:** `{}`\n\n", path.poc_calldata));
+            }
+            section
+        };
+
+        // NOVA SEÇÃO: MEV Opportunities
+        let mev_section = if self.mev_opportunities.is_empty() {
+            "No MEV extraction opportunities identified.\n".to_string()
+        } else {
+            let mut section = String::from("\n## MEV Extraction Opportunities\n\n");
+            section.push_str("| Type | Profit (ETH) | Competition | Tip (bps) |\n");
+            section.push_str("|------|--------------|-------------|-----------|\n");
+            for mev in &self.mev_opportunities {
+                section.push_str(&format!(
+                    "| {} | {:.6} | {:.2} | {} |\n",
+                    mev.mev_type,
+                    mev.estimated_profit_eth,
+                    mev.competition_score,
+                    mev.suggested_tip_bps
+                ));
+            }
+            section
+        };
+
+        // NOVA SEÇÃO: Resumo Ofensivo
+        let offensive_summary = format!(
+            "\n## Offensive Analysis Summary\n\n- **Exploitation Probability:** `{:.2}%`\n- **Risk-Adjusted Value:** `{:.6} ETH`\n- **Recommendation:** `{}`\n",
+            self.exploitation_probability * 100.0,
+            self.risk_adjusted_value,
+            self.recommendation
+        );
+
         format!(
-            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Chain: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n",
+            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Chain: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n{}{}{}{}\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n{}{}{}",
             self.id,
             self.chain,
             self.contract_address,
@@ -169,8 +368,15 @@ impl VulnerabilityReport {
             self.fork_validated,
             self.timestamp.to_rfc3339(),
             self.description,
+            proxy_section,
+            evidence_section,
+            value_flow_section,
+            behavioral_section,
             selectors,
-            self.state_delta.as_deref().unwrap_or("No state delta recorded")
+            self.state_delta.as_deref().unwrap_or("No state delta recorded"),
+            exploit_paths_section,
+            mev_section,
+            offensive_summary
         )
     }
 }
