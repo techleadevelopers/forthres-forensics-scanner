@@ -20,7 +20,7 @@ use crate::reporter::{
     VulnerabilityReporter,
 };
 
-const TENDERLY_FORK_URL: &str = "https://virtual.mainnet.us-east.rpc.tenderly.co/a0249f92-a47e-4d4d-afde-541070746d36";
+const TENDERLY_FORK_URL: &str = "https://virtual.mainnet.us-east.rpc.tenderly.co/a0249f92-a47..";
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScanMode {
@@ -346,76 +346,85 @@ async fn advanced_rpc_analysis(
     // ============================================================
     // 3. TESTA PRIVILEGE ESCALATION (transferOwnership)
     // ============================================================
-    let dangerous_selectors = [
-        ("transferOwnership", "0xf2fde38b"),
-        ("renounceOwnership", "0x715018a6"),
-        ("upgradeTo", "0x3659cfe6"),
-        ("setAdmin", "0x7045eab0"),
-    ];
-    
-    // Se encontrou o owner real, testa se a função é protegida
-    if let Some(owner) = &real_owner {
-        for (func_name, selector) in dangerous_selectors {
-            if selectors.contains(&selector.to_string()) {
-                tracing::info!("🔍 Testando {}(address) com diferentes callers", func_name);
+let dangerous_selectors = [
+    ("transferOwnership", "0xf2fde38b"),
+    ("renounceOwnership", "0x715018a6"),
+    ("upgradeTo", "0x3659cfe6"),
+    ("setAdmin", "0x7045eab0"),
+];
+
+// Se encontrou o owner real, testa se a função é protegida
+if let Some(owner) = &real_owner {
+    for (func_name, selector) in dangerous_selectors {
+        if selectors.contains(&selector.to_string()) {
+            tracing::info!("🔍 Testando {}(address) com diferentes callers", func_name);
+            
+            let test_address = "0x0000000000000000000000000000000000012345";
+            let calldata = format!("{}{:0>64}", selector.trim_start_matches("0x"), test_address.trim_start_matches("0x"));
+            let calldata = format!("0x{}", calldata);
+            
+            let test_callers = [
+                ("random", "0x1111111111111111111111111111111111111111"),
+                ("zero", "0x0000000000000000000000000000000000000000"),
+                ("attacker", "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            ];
+            
+            let mut protected = true;
+            
+            for (caller_type, caller) in test_callers {
+                let params = json!([
+                    {
+                        "to": contract_address,
+                        "from": caller,
+                        "data": calldata,
+                    },
+                    "latest"
+                ]);
                 
-                // Cria calldata com um endereço qualquer
-                let test_address = "0x0000000000000000000000000000000000012345";
-                let calldata = format!("{}{:0>64}", selector.trim_start_matches("0x"), test_address.trim_start_matches("0x"));
-                let calldata = format!("0x{}", calldata);
-                
-                // Testa com callers diferentes
-                let test_callers = [
-                    ("random", "0x1111111111111111111111111111111111111111"),
-                    ("zero", "0x0000000000000000000000000000000000000000"),
-                    ("attacker", "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
-                ];
-                
-                let mut protected = true;
-                
-                for (caller_type, caller) in test_callers {
-                    let params = json!([
-                        {
-                            "to": contract_address,
-                            "from": caller,
-                            "data": calldata,
-                        },
-                        "latest"
-                    ]);
-                    
-                    match rpc.call::<String>("eth_call", params).await {
-                        Ok((result, _)) => {
-                            if result != "0x" {
-                                protected = false;
-                                state_changes.push(format!(
-                                    "🚨 {} via {} succeeded with caller {}! Contrato VULNERÁVEL!",
-                                    func_name, selector, caller_type
-                                ));
-                                tracing::warn!("🚨 {} via {} succeeded! Contrato VULNERÁVEL!", func_name, selector);
-                            }
+                match rpc.call::<String>("eth_call", params).await {
+                    Ok((result, _)) => {
+                        // Revert silencioso é proteção
+                        if result == "0x" || result == "0x0000000000000000000000000000000000000000000000000000000000000000" {
+                            tracing::debug!("{} com {}: revert silencioso (protegido)", func_name, caller_type);
+                        } else if result != "0x" {
+                            protected = false;
+                            state_changes.push(format!(
+                                "🚨 {} via {} succeeded with caller {}! Contrato VULNERÁVEL!",
+                                func_name, selector, caller_type
+                            ));
+                            tracing::warn!("🚨 {} via {} succeeded! Contrato VULNERÁVEL!", func_name, selector);
                         }
-                        Err(_) => {
-                            tracing::debug!("{} com {} reverteu (protegido)", func_name, caller_type);
+                    }
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        if error_msg.contains("caller is not the owner") 
+                            || error_msg.contains("Ownable") 
+                            || error_msg.contains("only owner")
+                            || error_msg.contains("onlyOwner") {
+                            tracing::debug!("{} com {}: protegido por onlyOwner", func_name, caller_type);
+                        } else {
+                            tracing::debug!("{} com {} reverteu: {}", func_name, caller_type, error_msg);
                         }
                     }
                 }
-                
-                if protected {
-                    state_changes.push(format!(
-                        "{} via {}: protegido (apenas owner real: {}). Não explorável publicamente.",
-                        func_name, selector, owner
-                    ));
-                    tracing::info!("{} protegido - apenas owner pode chamar", func_name);
-                } else {
-                    suspicious = true;
-                    state_changes.push(format!(
-                        "🔥 EXPLOIT CONFIRMADO! {} pode ser chamado por qualquer caller!",
-                        func_name
-                    ));
-                }
+            }
+            
+            if protected {
+                state_changes.push(format!(
+                    "{} via {}: 🔒 PROTEGIDO (apenas owner real: {}). Não explorável publicamente.",
+                    func_name, selector, owner
+                ));
+                tracing::info!("{} protegido - apenas owner pode chamar", func_name);
+            } else {
+                suspicious = true;
+                state_changes.push(format!(
+                    "🔥 EXPLOIT CONFIRMADO! {} pode ser chamado por qualquer caller!",
+                    func_name
+                ));
             }
         }
     }
+}
     
     // ============================================================
     // 4. TESTES GERAIS COM DIFERENTES CALLERS
@@ -531,11 +540,11 @@ pub async fn scan_contract(
     
     // 🔥 AGORA USA SUA RPC PAGA (sem Tenderly)
     let fork_url = if request.fork == ForkMode::Force {
-        tracing::info!("Usando BSC Mainnet REAL via RPC paga para validação de exploits");
-        config.http_endpoints.first().unwrap().clone()
-    } else {
-        config.anvil_url.clone()
-    };
+    tracing::info!("Usando Tenderly fork para validação (respeita onlyOwner)");
+    TENDERLY_FORK_URL.to_string()
+} else {
+    config.anvil_url.clone()
+};
     
     let forensics = ForensicsEngine::new(fork_url, config.chain_id);
     let live_chain_id = fetch_chain_id(&rpc).await?;
@@ -713,82 +722,92 @@ pub async fn scan_contract(
     let mut state_delta: Option<String> = None;
 
     if should_run_fork {
-        emit(step_event("fork", "Anvil fork execution", "running"));
-        
-        match forensics
-            .validate_with_fork(&request.contract_address, &analysis, "0x0000000000000000000000000000000000000000")
-            .await
-        {
-            Ok(Some(result)) => {
-                fork_validated = result.unauthorized_access || result.balance_drained || result.ownership_changed;
-                state_delta = Some(result.state_delta);
-                if fork_validated {
-                    emit(log_event(
-                        "Fork validation confirmed a reachable unauthorized execution path".to_string(),
-                        "warn",
-                    ));
-                } else {
-                    emit(log_event(
-                        "Fork validation completed without exploitable state change".to_string(),
-                        "info",
-                    ));
-                }
-            }
-            Ok(None) => {
-                emit(log_event(
-                    "Fork não disponível — usando fallback RPC".to_string(),
-                    "info",
-                ));
-                
-                match advanced_rpc_analysis(&rpc, &request.contract_address, &analysis, &selectors).await {
-                    Ok((rpc_found_exploit, rpc_state_delta)) => {
-                        fork_validated = rpc_found_exploit;
-                        state_delta = rpc_state_delta.map(|v| v.to_string());
+    emit(step_event("fork", "Anvil fork execution", "running"));
+    
+    // 🔥 PRIMEIRO: Roda advanced_rpc_analysis para detectar onlyOwner
+    match advanced_rpc_analysis(&rpc, &request.contract_address, &analysis, &selectors).await {
+        Ok((rpc_found_exploit, rpc_state_delta)) => {
+            if rpc_found_exploit {
+                // Só é potencialmente vulnerável - testa no fork
+                match forensics
+                    .validate_with_fork(&request.contract_address, &analysis, "0x0000000000000000000000000000000000000000")
+                    .await
+                {
+                    Ok(Some(result)) => {
+                        fork_validated = result.unauthorized_access || result.balance_drained || result.ownership_changed;
+                        state_delta = Some(result.state_delta);
                         if fork_validated {
                             emit(log_event(
-                                "Fallback RPC analysis confirmed suspicious execution pattern".to_string(),
+                                "Fork validation confirmed a reachable unauthorized execution path".to_string(),
                                 "warn",
                             ));
                         } else {
                             emit(log_event(
-                                "Fallback RPC analysis completed without finding exploit patterns".to_string(),
+                                "Fork validation completed without exploitable state change".to_string(),
                                 "info",
                             ));
                         }
                     }
-                    Err(error) => {
+                    Ok(None) => {
                         emit(log_event(
-                            format!("Fallback RPC analysis failed: {}", error),
+                            "Fork não disponível — usando análise RPC".to_string(),
+                            "info",
+                        ));
+                        fork_validated = rpc_found_exploit;
+                        state_delta = rpc_state_delta.map(|v| v.to_string());
+                    }
+                    Err(error) => {
+                        emit(log_event(format!("Fork validation failed: {error}"), "warn"));
+                        fork_validated = rpc_found_exploit;
+                        state_delta = rpc_state_delta.map(|v| v.to_string());
+                    }
+                }
+            } else {
+                // 🔥 Contrato é PROTEGIDO (onlyOwner detectado)
+                fork_validated = false;
+                emit(log_event(
+                    "✅ Contrato é PROTEGIDO por onlyOwner. Não é explorável publicamente.".to_string(),
+                    "info",
+                ));
+            }
+        }
+        Err(error) => {
+            emit(log_event(
+                format!("Advanced RPC analysis failed: {}", error),
+                "warn",
+            ));
+            // Fallback: tenta fork direto
+            match forensics
+                .validate_with_fork(&request.contract_address, &analysis, "0x0000000000000000000000000000000000000000")
+                .await
+            {
+                Ok(Some(result)) => {
+                    fork_validated = result.unauthorized_access || result.balance_drained || result.ownership_changed;
+                    state_delta = Some(result.state_delta);
+                    if fork_validated {
+                        emit(log_event(
+                            "Fork validation confirmed a reachable unauthorized execution path".to_string(),
                             "warn",
                         ));
                     }
                 }
-            }
-            Err(error) => {
-                emit(log_event(format!("Fork validation failed: {error}"), "warn"));
-                if request.fork == ForkMode::Force {
-                    emit(log_event(
-                        "Tentando fallback RPC após falha no fork...".to_string(),
-                        "info",
-                    ));
-                    match advanced_rpc_analysis(&rpc, &request.contract_address, &analysis, &selectors).await {
-                        Ok((rpc_found, rpc_delta)) => {
-                            fork_validated = rpc_found;
-                            state_delta = rpc_delta.map(|v| v.to_string());
-                        }
-                        Err(_) => {}
-                    }
+                Ok(None) => {
+                    emit(log_event("Fork não disponível".to_string(), "info"));
+                }
+                Err(e) => {
+                    emit(log_event(format!("Fork validation failed: {}", e), "warn"));
                 }
             }
         }
-        emit(step_event("fork", "Anvil fork execution", "done"));
-    } else {
-        emit(step_event("fork", "Anvil fork execution", "skipped"));
-        emit(log_event(
-            format!("Fork skipped because confidence {provisional_score}/100 is below threshold"),
-            "info",
-        ));
     }
+    emit(step_event("fork", "Anvil fork execution", "done"));
+} else {
+    emit(step_event("fork", "Anvil fork execution", "skipped"));
+    emit(log_event(
+        format!("Fork skipped because confidence {provisional_score}/100 is below threshold"),
+        "info",
+    ));
+}
 
     let has_access_control = simulation.all_reverted() || proxy.has_admin_control();
     
@@ -912,7 +931,7 @@ pub async fn scan_contract(
         ),
         function_selector: selectors.first().cloned(),
         flagged_selectors: selectors,
-        state_delta: state_delta.map(|s| serde_json::json!(s)),
+        state_delta: state_delta.map(|s| s.to_string()),
         timestamp: Utc::now(),
         fork_validated,
         confidence_score: resolution.confidence_score,
