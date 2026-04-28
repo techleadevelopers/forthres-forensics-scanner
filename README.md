@@ -1,10 +1,10 @@
-# SafeContract — EVM Security & Exploit Intelligence Engine
-
-> **Motor avançado de auditoria e inferência de exploits para contratos EVM (Ethereum, BSC, Arbitrum)**  
-> Combina análise estática, simulação RPC, execução simbólica e validação por fork para detectar vulnerabilidades com **contexto econômico real (MEV-aware)**.
+# EVM Security & Exploit Intelligence Engine
 
 [![Rust](https://img.shields.io/badge/rust-1.84%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> **Motor avançado de auditoria e inferência de exploits para contratos EVM (Ethereum, BSC, Arbitrum)**  
+> Combina análise estática, simulação RPC, execução simbólica e validação por fork para detectar vulnerabilidades com **contexto econômico real (MEV-aware)**.
 
 ---
 
