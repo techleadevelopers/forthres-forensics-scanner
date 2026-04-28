@@ -8,7 +8,7 @@
 
 ---
 
-## 🧠 Visão Geral
+##  Visão Geral
 
 O **Ghost Scanner** não é apenas um scanner de vulnerabilidades.
 
@@ -18,15 +18,15 @@ Ele é um **motor de inferência de exploração**, projetado para responder:
 
 Para isso, ele combina múltiplas camadas:
 
-- 🔍 **Análise estrutural (bytecode)**
-- ⚡ **Simulação RPC (eth_call)**
-- 🧩 **Execução simbólica + modelagem de estado**
-- 🔥 **Análise ofensiva (exploit paths + MEV)**
-- 🧪 **Validação opcional via fork (Anvil/Tenderly)**
+-  **Análise estrutural (bytecode)**
+-  **Simulação RPC (eth_call)**
+-  **Execução simbólica + modelagem de estado**
+-  **Análise ofensiva (exploit paths + MEV)**
+-  **Validação opcional via fork (Anvil/Tenderly)**
 
 ---
 
-## 🎯 Capacidades
+##  Capacidades
 
 | Módulo | Descrição | Resultado |
 |--------|----------|----------|
@@ -39,7 +39,7 @@ Para isso, ele combina múltiplas camadas:
 
 ---
 
-## 📊 Modelo de Confiança
+##  Modelo de Confiança
 
 | Score | Classificação | Interpretação |
 |------|-------------|--------------|
@@ -51,7 +51,7 @@ Para isso, ele combina múltiplas camadas:
 
 ---
 
-## 🏗️ Arquitetura
+##  Arquitetura
 
 ```text
                 ┌────────────────────────────┐
@@ -75,7 +75,7 @@ Para isso, ele combina múltiplas camadas:
 
 ---
 
-## ⚙️ Estrutura do Projeto
+##  Estrutura do Projeto
 
 ```text
 ghost-scanner/
@@ -101,7 +101,7 @@ ghost-scanner/
 
 ---
 
-## ⚡ Pipeline de Execução
+##  Pipeline de Execução
 
 ```text
 1. Fetch bytecode (RPC)
@@ -117,7 +117,7 @@ ghost-scanner/
 
 ---
 
-## 🧠 Offensive Engine (diferencial real)
+##  Offensive Engine (diferencial real)
 
 O módulo `offensive/` transforma análise em **exploitability real**:
 
@@ -168,7 +168,7 @@ scanner.stdout.on('data', (data) => {
 
 ---
 
-## 📄 Relatórios
+##  Relatórios
 
 ```text
 reports/
