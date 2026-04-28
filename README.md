@@ -1,70 +1,241 @@
-# Auditoring Smart Contract — Workspace
+# 👻 Ghost Scanner — EVM Security & Exploit Intelligence Engine
 
-## Overview
+> **Motor avançado de auditoria e inferência de exploits para contratos EVM (Ethereum, BSC, Arbitrum)**  
+> Combina análise estática, simulação RPC, execução simbólica e validação por fork para detectar vulnerabilidades com **contexto econômico real (MEV-aware)**.
 
-pnpm workspace monorepo using TypeScript. EVM smart contract security auditing engine with a React dashboard.
+[![Rust](https://img.shields.io/badge/rust-1.84%2B-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Stack
+---
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
-- **Frontend**: React + Vite + Tailwind CSS + shadcn/ui
+## 🧠 Visão Geral
 
-## Key Commands
+O **Ghost Scanner** não é apenas um scanner de vulnerabilidades.
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-  - **CRITICAL**: After codegen always overwrite `lib/api-zod/src/index.ts` with only `export * from "./generated/api";`
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+Ele é um **motor de inferência de exploração**, projetado para responder:
 
-## Architecture
+> **“Isso é explorável no mundo real?”**
 
-### Artifacts
+Para isso, ele combina múltiplas camadas:
 
-- **API Server** (`artifacts/api-server/`) — Express 5 REST API on port from `$PORT` (8080 dev)
-  - Routes: `/api/reports`, `/api/scanner/status`, `/api/scanner/endpoints`, `/api/scanner/run` (SSE)
-- **UI** (`artifacts/contract-scanner-ui/`) — React dashboard at `/`
-  - Pages: Dashboard, Scanner (live scan with SSE logs), Reports, ReportDetail, Endpoints
+- 🔍 **Análise estrutural (bytecode)**
+- ⚡ **Simulação RPC (eth_call)**
+- 🧩 **Execução simbólica + modelagem de estado**
+- 🔥 **Análise ofensiva (exploit paths + MEV)**
+- 🧪 **Validação opcional via fork (Anvil/Tenderly)**
 
-### Libraries
+---
 
-- `lib/db/` — Drizzle ORM schema + DB connection (`vulnerability_reports` table)
-- `lib/api-spec/` — OpenAPI YAML spec (source of truth for all API shapes)
-- `lib/api-client-react/` — Generated React Query hooks (via Orval)
-- `lib/api-zod/` — Generated Zod validators (via Orval)
+## 🎯 Capacidades
 
-### Scanner Pipeline (SSE endpoint `/api/scanner/run`)
+| Módulo | Descrição | Resultado |
+|--------|----------|----------|
+| **Bytecode Intelligence** | Detecção de padrões perigosos (DELEGATECALL, SELFDESTRUCT, CALLCODE) | Flags + severity |
+| **Selector Intelligence** | Extração + matching com base de assinaturas | Surface mapping |
+| **RPC Simulation Layer** | Execução de chamadas reais via `eth_call` | Behavior inference |
+| **State Approximation Engine** | Modelagem parcial de storage e fluxos | Contexto de execução |
+| **Offensive Engine** | Geração de caminhos de exploit e análise econômica | Probabilidade + EV |
+| **Fork Validation (opcional)** | Execução em fork real | Confirmação de exploit |
 
-POST with `{ contractAddress, mode, simulation, fork }` returns a real-time SSE stream:
-1. Bytecode fetch + decode
-2. Opcode analysis (DELEGATECALL, SELFDESTRUCT, CALLCODE)
-3. ABI selector extraction (4-byte database)
-4. eth_call simulation (optional, +50 confidence)
-5. Anvil fork validation (conditional on confidence ≥ 60 in auto mode)
-6. Confidence score output + persist to DB
+---
 
-### Confidence Score
+## 📊 Modelo de Confiança
 
-0-100 integer score on every report:
-- Dangerous opcodes found: +15 each
-- Flagged selectors: +10 each
-- Simulation success: +50
-- Value transfer in simulation: +30
-- Fork validation confirms: +20
-- `≥ 80` → CRITICAL, `≥ 60` → HIGH, `≥ 40` → MEDIUM, `≥ 20` → LOW, else INFO
+| Score | Classificação | Interpretação |
+|------|-------------|--------------|
+| 80–100 | 🔴 CRITICAL | Exploit altamente provável / confirmado |
+| 60–79  | 🟠 HIGH     | Forte evidência de exploração |
+| 40–59  | 🟡 MEDIUM   | Possível exploração (condicional) |
+| 20–39  | 🔵 LOW      | Baixo risco |
+| 0–19   | ⚪ INFO     | Sem evidência relevante |
 
-## DB Schema Notes
+---
 
-- `vulnerability_reports` table has `confidence_score INTEGER NOT NULL DEFAULT 0`
-- Always run `pnpm --filter @workspace/db run push-force` after schema changes
+## 🏗️ Arquitetura
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+```text
+                ┌────────────────────────────┐
+                │     ghost-scanner (Rust)   │
+                ├────────────────────────────┤
+                │ scanner.rs (orchestrator)  │
+                ├──────────────┬─────────────┤
+                │ bytecode.rs  │ selectors   │
+                │ forensics.rs │ fork layer  │
+                │ offensive/   │ exploit AI  │
+                │ reporter.rs  │ output      │
+                └──────┬───────┴─────────────┘
+                       │
+                JSON (stdout stream)
+                       │
+        ┌──────────────▼──────────────┐
+        │        API Server (Node)    │
+        │  spawn + stream processing │
+        └────────────────────────────┘
+```
+
+---
+
+## ⚙️ Estrutura do Projeto
+
+```text
+ghost-scanner/
+├── reports/
+├── scripts/
+├── src/
+│   ├── bin/
+│   │   └── ghost-scanner.rs
+│   ├── offensive/
+│   │   ├── path_finder.rs
+│   │   ├── probability_engine.rs
+│   │   ├── economic_impact.rs
+│   │   ├── mev_integration.rs
+│   │   ├── feedback_loop.rs
+│   │   └── symbolic_executor.rs
+│   ├── bytecode.rs
+│   ├── config.rs
+│   ├── forensics.rs
+│   ├── load_balancer.rs
+│   ├── reporter.rs
+│   └── scanner.rs
+```
+
+---
+
+## ⚡ Pipeline de Execução
+
+```text
+1. Fetch bytecode (RPC)
+2. Decode + opcode scan
+3. Extract selectors
+4. Simulate via eth_call
+5. Build state approximation
+6. Generate exploit hypotheses
+7. Score (probability + EV)
+8. (Opcional) validar via fork
+9. Gerar relatório final
+```
+
+---
+
+## 🧠 Offensive Engine (diferencial real)
+
+O módulo `offensive/` transforma análise em **exploitability real**:
+
+- **Path Finder** → constrói CFG + condições
+- **Symbolic Executor** → explora caminhos possíveis
+- **Monte Carlo Engine** → estima probabilidade
+- **Economic Model** → calcula valor drenável
+- **MEV Layer** → identifica:
+  - frontrun
+  - backrun
+  - sandwich
+- **Feedback Loop** → mutação adaptativa de cenários
+
+### Exemplo de saída:
+
+```json
+{
+  "exploitationProbability": 0.87,
+  "riskAdjustedValue": 14.2,
+  "exploitPaths": [
+    {
+      "entrySelector": "0xf2fde38b",
+      "probability": 0.94,
+      "economicValueEth": 16.0
+    }
+  ]
+}
+```
+
+---
+
+## 📡 Integração (Node.js)
+
+O scanner opera como **stream JSON (event-driven)**:
+
+```js
+const scanner = spawn('./ghost-scanner', [...]);
+
+scanner.stdout.on('data', (data) => {
+  const lines = data.toString().split('\n');
+  for (const line of lines) {
+    if (!line) continue;
+    const event = JSON.parse(line);
+    sendToClient(event);
+  }
+});
+```
+
+---
+
+## 📄 Relatórios
+
+```text
+reports/
+├── *.json   ← machine-readable
+└── *.md     ← human-readable
+```
+
+Inclui:
+
+- severity + confidence
+- evidências
+- value flow
+- exploit paths
+- análise MEV
+- recomendações
+
+---
+
+## 🧪 Testes
+
+```bash
+cargo test
+```
+
+Cobertura inclui:
+
+- parsing de bytecode
+- engine probabilística
+- geração de paths
+- feedback loop
+
+---
+
+## 🔧 Troubleshooting
+
+| Problema | Solução |
+|--------|--------|
+| Bytecode não encontrado | Verifique rede + endereço |
+| RPC mismatch | Ajuste `SCANNER_CHAIN_ID` |
+| Fork não funciona | Verifique `ANVIL_RPC_URL` |
+| Erro TypedTransaction | Use `provider.call()` |
+
+---
+
+## 📌 Stack Técnica
+
+- **Rust** → performance + safety
+- **ethers-rs** → RPC / EVM
+- **tokio** → async runtime
+- **serde** → serialization
+- **reqwest** → fallback RPC
+- **sha3** → selectors
+- **tracing** → observabilidade
+
+---
+
+## ⚠️ Aviso
+
+Uso restrito a:
+
+- auditoria autorizada
+- pesquisa de segurança
+
+Exploração sem permissão é ilegal.
+
+---
+
+## 📄 Licença
+
+MIT © Ghost Scanner Contributors
