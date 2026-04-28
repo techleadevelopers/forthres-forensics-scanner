@@ -10,7 +10,7 @@
 
 ##  Visão Geral
 
-O **Ghost Scanner** não é apenas um scanner de vulnerabilidades.
+O **SafeContract** não é apenas um scanner de vulnerabilidades.
 
 Ele é um **motor de inferência de exploração**, projetado para responder:
 
@@ -238,4 +238,4 @@ Exploração sem permissão é ilegal.
 
 ## 📄 Licença
 
-MIT © Ghost Scanner Contributors
+MIT © SafeContract Contributors
