@@ -1,4 +1,4 @@
-# 👻 Ghost Scanner — EVM Security & Exploit Intelligence Engine
+# 👻 SafeContract — EVM Security & Exploit Intelligence Engine
 
 > **Motor avançado de auditoria e inferência de exploits para contratos EVM (Ethereum, BSC, Arbitrum)**  
 > Combina análise estática, simulação RPC, execução simbólica e validação por fork para detectar vulnerabilidades com **contexto econômico real (MEV-aware)**.
