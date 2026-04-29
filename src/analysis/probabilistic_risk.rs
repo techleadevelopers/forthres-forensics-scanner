@@ -389,7 +389,7 @@ pub async fn calculate_probabilities(
         }
     }
     
-    results.sort_by(|a, b| b.probability.partial_cmp(&a.probability).unwrap());
+    results.sort_by(|a, b| b.probability.total_cmp(&a.probability));
     results
 }
 
