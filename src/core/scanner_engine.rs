@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{panic::AssertUnwindSafe, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use futures_util::future::join_all;
+use futures_util::{future::join_all, FutureExt};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -831,8 +831,11 @@ pub async fn scan_contract(
     
     let offensive_engine = OffensiveEngine::new(offensive_config, forensics.clone());
     
-    match offensive_engine.analyze(&request.contract_address, &analysis).await {
-        Ok(offensive_report) => {
+    match AssertUnwindSafe(offensive_engine.analyze(&request.contract_address, &analysis))
+        .catch_unwind()
+        .await
+    {
+        Ok(Ok(offensive_report)) => {
             exploit_paths = offensive_report.exploit_paths;
             mev_opportunities = offensive_report.mev_opportunities;
             exploitation_probability = offensive_report.exploitation_probability;
@@ -872,9 +875,15 @@ pub async fn scan_contract(
                 ));
             }
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             emit(log_event(
                 format!("Offensive analysis failed: {}", error),
+                "warn",
+            ));
+        }
+        Err(_) => {
+            emit(log_event(
+                "Offensive analysis panicked; continuing with non-offensive evidence only".to_string(),
                 "warn",
             ));
         }
