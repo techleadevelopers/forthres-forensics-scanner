@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, panic::{catch_unwind, AssertUnwindSafe}, sync::Arc};
 
 use anyhow::Result;
 use axum::{
@@ -113,45 +113,52 @@ async fn scan(
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let _ = tx.send(json!({
-                    "type": "error",
-                    "message": format!("failed to start scanner runtime: {err}"),
-                })
-                .to_string());
-                return;
-            }
+        let error_tx = tx.clone();
+        let send_error = |message: String| {
+            let _ = error_tx.send(json!({
+                "type": "error",
+                "message": message,
+            }).to_string());
         };
 
-        runtime.block_on(async move {
-            let emit = |payload: serde_json::Value| {
-                let _ = tx.send(payload.to_string());
-            };
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| format!("failed to start scanner runtime: {err}"))?;
 
-            let result = scanner::scan_contract(&config, request, |event| {
-                let payload = serde_json::to_value(&event).unwrap_or_else(|_| {
-                    json!({ "type": "error", "message": "failed to serialize scan event" })
-                });
-                emit(payload);
+            runtime.block_on(async move {
+                let emit = |payload: serde_json::Value| {
+                    let _ = tx.send(payload.to_string());
+                };
+
+                let result = scanner::scan_contract(&config, request, |event| {
+                    let payload = serde_json::to_value(&event).unwrap_or_else(|_| {
+                        json!({ "type": "error", "message": "failed to serialize scan event" })
+                    });
+                    emit(payload);
+                })
+                .await;
+
+                match result {
+                    Ok(report) => emit(json!({
+                        "type": "complete",
+                        "report": report,
+                    })),
+                    Err(err) => emit(json!({
+                        "type": "error",
+                        "message": err.to_string(),
+                    })),
+                }
+                Ok::<(), String>(())
             })
-            .await;
+        }));
 
-            match result {
-                Ok(report) => emit(json!({
-                    "type": "complete",
-                    "report": report,
-                })),
-                Err(err) => emit(json!({
-                    "type": "error",
-                    "message": err.to_string(),
-                })),
-            }
-        });
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => send_error(message),
+            Err(_) => send_error("scanner runtime panicked before emitting a completion report".to_string()),
+        }
     });
 
     let stream = UnboundedReceiverStream::new(rx)
