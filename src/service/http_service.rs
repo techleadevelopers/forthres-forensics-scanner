@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::{
-    config::ScannerConfig,
+    config::{parse_chain, ScannerConfig},
     reporter::{EndpointHealthSnapshot, ScannerStatusSnapshot},
     scanner::{self, ForkMode, ScanMode, ScanRequest},
 };
@@ -29,8 +29,14 @@ struct AppState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ChainQuery {
+    chain: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanHttpRequest {
+    chain: Option<String>,
     #[serde(alias = "contract_address")]
     contract_address: String,
     mode: Option<String>,
@@ -58,12 +64,17 @@ pub async fn serve_http(config: ScannerConfig, addr: SocketAddr) -> Result<()> {
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
-        "chain": state.config.chain.as_str(),
+        "defaultChain": state.config.chain.as_str(),
+        "supportedChains": ["ethereum", "arbitrum", "bnb"],
     }))
 }
 
-async fn status(State(state): State<AppState>) -> Result<Json<ScannerStatusSnapshot>, HttpError> {
-    let snapshot = scanner::collect_status(&state.config)
+async fn status(
+    State(state): State<AppState>,
+    Query(query): Query<ChainQuery>,
+) -> Result<Json<ScannerStatusSnapshot>, HttpError> {
+    let config = resolve_request_config(&state, query.chain.as_deref())?;
+    let snapshot = scanner::collect_status(&config)
         .await
         .map_err(HttpError::internal)?;
     Ok(Json(snapshot))
@@ -71,8 +82,10 @@ async fn status(State(state): State<AppState>) -> Result<Json<ScannerStatusSnaps
 
 async fn endpoints(
     State(state): State<AppState>,
+    Query(query): Query<ChainQuery>,
 ) -> Result<Json<Vec<EndpointHealthSnapshot>>, HttpError> {
-    let snapshot = scanner::collect_endpoints(&state.config)
+    let config = resolve_request_config(&state, query.chain.as_deref())?;
+    let snapshot = scanner::collect_endpoints(&config)
         .await
         .map_err(HttpError::internal)?;
     Ok(Json(snapshot))
@@ -88,6 +101,8 @@ async fn scan(
         ));
     }
 
+    let config = resolve_request_config(&state, body.chain.as_deref())?;
+
     let request = ScanRequest {
         contract_address: body.contract_address.trim().to_string(),
         mode: parse_mode(body.mode.as_deref())?,
@@ -95,7 +110,6 @@ async fn scan(
         fork: parse_fork(body.fork.as_deref())?,
     };
 
-    let config = Arc::clone(&state.config);
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     std::thread::spawn(move || {
@@ -144,6 +158,23 @@ async fn scan(
         .map(|payload| Ok::<Event, std::convert::Infallible>(Event::default().data(payload)));
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn resolve_request_config(
+    state: &AppState,
+    requested_chain: Option<&str>,
+) -> Result<Arc<ScannerConfig>, HttpError> {
+    let Some(requested_chain) = requested_chain else {
+        return Ok(Arc::clone(&state.config));
+    };
+
+    let chain = parse_chain(requested_chain).map_err(HttpError::internal)?;
+    if chain == state.config.chain {
+        return Ok(Arc::clone(&state.config));
+    }
+
+    let config = ScannerConfig::from_env_for_chain(chain).map_err(HttpError::internal)?;
+    Ok(Arc::new(config))
 }
 
 #[derive(Debug)]
