@@ -485,7 +485,7 @@ pub async fn calculate_economic_value(
         });
     }
     
-    results.sort_by(|a, b| b.risk_adjusted_value.partial_cmp(&a.risk_adjusted_value).unwrap());
+    results.sort_by(|a, b| b.risk_adjusted_value.total_cmp(&a.risk_adjusted_value));
     results
 }
 
