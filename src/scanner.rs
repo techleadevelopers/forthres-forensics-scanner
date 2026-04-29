@@ -606,7 +606,12 @@ pub async fn scan_contract(
     } else {
         for flag in &analysis.flags {
             emit(log_event(
-                format!("{} at offset 0x{:x}", opcode_name(flag.opcode), flag.offset),
+                format!(
+                    "{} severity={} at offset 0x{:x}",
+                    opcode_name(flag.opcode),
+                    flag.severity,
+                    flag.offset
+                ),
                 "warn",
             ));
         }
@@ -1065,6 +1070,40 @@ fn collect_selectors(analysis: &BytecodeAnalysis) -> Vec<String> {
         .collect()
 }
 
+fn opcode_capability_summary(analysis: &BytecodeAnalysis) -> String {
+    let mut capabilities = Vec::new();
+
+    if analysis.has_selfdestruct {
+        capabilities.push("selfdestruct");
+    }
+    if analysis.has_delegatecall {
+        capabilities.push("delegatecall");
+    }
+    if analysis.has_callcode {
+        capabilities.push("callcode");
+    }
+    if analysis.has_create2 {
+        capabilities.push("create2");
+    }
+
+    let byte_len = analysis.bytecode.as_ref().map(|bytecode| bytecode.len()).unwrap_or(0);
+    let severity = analysis
+        .top_severity()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| "NONE".to_string());
+
+    if capabilities.is_empty() {
+        format!("Opcode capability summary: topSeverity={severity} bytecodeBytes={byte_len}.")
+    } else {
+        format!(
+            "Opcode capability summary: topSeverity={} capabilities={} bytecodeBytes={}.",
+            severity,
+            capabilities.join(","),
+            byte_len
+        )
+    }
+}
+
 fn calculate_confidence(
     analysis: &BytecodeAnalysis,
     dangerous_match_count: usize,
@@ -1214,6 +1253,7 @@ fn build_description(
                 .join(", ")
         ));
     }
+    segments.push(opcode_capability_summary(analysis));
 
     if dangerous_matches.is_empty() {
         segments.push("No dangerous selector match was found.".to_string());
