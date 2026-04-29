@@ -5,7 +5,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release
+RUN cargo build --release --bin ghost-scanner
 
 FROM debian:bookworm-slim
 
@@ -25,6 +25,8 @@ USER scanner
 
 ENV RUST_LOG=info
 ENV SCANNER_OUTPUT_DIR=/app/reports
+ENV PORT=8081
 
-ENTRYPOINT ["/usr/local/bin/ghost-scanner"]
-CMD ["status"]
+EXPOSE 8081
+
+CMD ["sh", "-lc", "exec /usr/local/bin/ghost-scanner serve --host 0.0.0.0 --port ${PORT:-8081}"]
