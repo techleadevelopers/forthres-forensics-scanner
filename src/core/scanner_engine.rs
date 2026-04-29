@@ -900,6 +900,7 @@ pub async fn scan_contract(
         analysis.flags.is_empty(),
         has_only_admin_functions(&dangerous_matches),
         looks_like_standard_token(&selectors),
+        looks_like_known_legit_contract(&request.contract_address, &selectors),
     );
     let simulation_only = request.simulation && !fork_validated;
     let value_flow = infer_value_flow(&selectors, proxy.is_proxy());
@@ -1142,6 +1143,7 @@ fn resolve_classification(
     has_no_dangerous_opcode: bool,
     has_only_admin_functions: bool,
     looks_like_standard_token: bool,
+    looks_like_known_legit_contract: bool,
 ) -> Resolution {
     if fork_validated {
         return Resolution {
@@ -1164,6 +1166,14 @@ fn resolve_classification(
             severity: Severity::High,
             kind: VulnerabilityKind::HighRiskPattern,
             confidence_score: base_confidence.max(70),
+        };
+    }
+
+    if looks_like_known_legit_contract && !has_exploit_path {
+        return Resolution {
+            severity: Severity::Info,
+            kind: VulnerabilityKind::GenericContract,
+            confidence_score: base_confidence.clamp(20, 35),
         };
     }
 
@@ -1402,13 +1412,7 @@ impl ProxyMetadata {
 }
 
 fn opcode_name(opcode: u8) -> &'static str {
-    match opcode {
-        0xF4 => "DELEGATECALL",
-        0xFF => "SELFDESTRUCT",
-        0xF2 => "CALLCODE",
-        0xF5 => "CREATE2",
-        _ => "UNKNOWN",
-    }
+    BytecodeScanner::opcode_to_mnemonic(opcode)
 }
 
 fn mode_label(mode: ScanMode) -> &'static str {
@@ -1470,6 +1474,34 @@ fn looks_like_standard_token(selectors: &[String]) -> bool {
     STANDARD_TOKEN_SELECTORS
         .iter()
         .all(|selector| selectors.iter().any(|candidate| candidate == selector))
+}
+
+fn looks_like_known_legit_contract(contract_address: &str, selectors: &[String]) -> bool {
+    const KNOWN_ADDRESSES: [&str; 3] = [
+        "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    ];
+    const ERC20_SELECTORS: [&str; 6] = [
+        "0x06fdde03",
+        "0x095ea7b3",
+        "0x18160ddd",
+        "0x70a08231",
+        "0xa9059cbb",
+        "0xdd62ed3e",
+    ];
+
+    let address = contract_address.to_ascii_lowercase();
+    if KNOWN_ADDRESSES.contains(&address.as_str()) {
+        return true;
+    }
+
+    let erc20_count = ERC20_SELECTORS
+        .iter()
+        .filter(|selector| selectors.iter().any(|candidate| candidate == **selector))
+        .count();
+
+    erc20_count >= 4
 }
 
 fn infer_value_flow(selectors: &[String], is_proxy: bool) -> ValueFlowHeuristics {
