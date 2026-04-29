@@ -361,7 +361,7 @@ impl HexoraOffensiveEngine {
             }
         }
         
-        results.sort_by(|a, b| b.probability.partial_cmp(&a.probability).unwrap());
+        results.sort_by(|a, b| b.probability.total_cmp(&a.probability));
         results.truncate(self.config.max_paths);
         results
     }
@@ -391,7 +391,7 @@ impl HexoraOffensiveEngine {
             }
         }
         
-        results.sort_by(|a, b| b.risk_adjusted_value.partial_cmp(&a.risk_adjusted_value).unwrap());
+        results.sort_by(|a, b| b.risk_adjusted_value.total_cmp(&a.risk_adjusted_value));
         results
     }
     
@@ -438,7 +438,7 @@ impl HexoraOffensiveEngine {
             all_attempts.extend(attempts);
         }
         
-        all_attempts.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        all_attempts.sort_by(|a, b| b.score.total_cmp(&a.score));
         all_attempts.truncate(20);
         all_attempts
     }
