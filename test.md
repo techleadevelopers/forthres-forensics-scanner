@@ -29,3 +29,9 @@ cargo run --bin ghost-scanner -- scan `
   --mode deep `
   --simulation true `
   --fork force
+
+
+  npx hexora-scan scan 0x1Af5BB53d00eAF7C689F34f1382d2cb9Ed927303 --chain ethereum --mode deep --api-key hexora_live_26cce86fde783d01b0822d4fc67aa230cb23ed65022f5fa7
+$env:HEXORA_API_BASE_URL="https://hexora-api-server-production.up.railway.app"
+$env:HEXORA_API_KEY="hexora_live_26cce86fde783d01b0822d4fc67aa230cb23ed65022f5fa7"
+
