@@ -5,7 +5,7 @@ edition = "2021"
 
 [[bin]]
 name = "ghost-scanner"
-path = "src/main.rs"
+path = "src/bin/hexora-scan.rs"
 
 [dependencies]
 # Async runtime
@@ -13,6 +13,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] 
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
+axum = "0.7"
 fastrand = "2.0"  # Para mutations aleatórias
 ethers = { version = "2.0", features = ["rustls"] }
 dotenv = "0.15"
@@ -41,6 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # Data structures
 dashmap = "6"
+lru = "0.12"
 
 # Async traits
 async-trait = "0.1"
