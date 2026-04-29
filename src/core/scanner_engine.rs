@@ -895,6 +895,7 @@ pub async fn scan_contract(
         fork_validated,
         !exploit_paths.is_empty(),
         exploitation_probability,
+        risk_adjusted_value,
         proxy.is_proxy(),
         has_access_control,
         analysis.flags.is_empty(),
@@ -933,6 +934,7 @@ pub async fn scan_contract(
             &proxy,
             !exploit_paths.is_empty(),
             value_flow,
+            &final_kind,
         ),
         function_selector: selectors.first().cloned(),
         flagged_selectors: selectors,
@@ -1138,6 +1140,7 @@ fn resolve_classification(
     fork_validated: bool,
     has_exploit_path: bool,
     exploitation_probability: f64,
+    risk_adjusted_value: f64,
     is_proxy: bool,
     has_access_control: bool,
     has_no_dangerous_opcode: bool,
@@ -1145,27 +1148,20 @@ fn resolve_classification(
     looks_like_standard_token: bool,
     looks_like_known_legit_contract: bool,
 ) -> Resolution {
-    if fork_validated {
+    const CONFIRMED_MIN_PROBABILITY: f64 = 0.20;
+    const CONFIRMED_MIN_RISK_ADJUSTED_VALUE_ETH: f64 = 0.01;
+    const POSSIBLE_MIN_PROBABILITY: f64 = 0.10;
+    const HIGH_RISK_MIN_PROBABILITY: f64 = 0.45;
+
+    let meets_confirmed_thresholds = has_exploit_path
+        && exploitation_probability >= CONFIRMED_MIN_PROBABILITY
+        && risk_adjusted_value >= CONFIRMED_MIN_RISK_ADJUSTED_VALUE_ETH;
+
+    if fork_validated && meets_confirmed_thresholds {
         return Resolution {
             severity: Severity::Critical,
             kind: VulnerabilityKind::ExploitConfirmed,
             confidence_score: base_confidence.max(95),
-        };
-    }
-
-    if has_exploit_path {
-        return Resolution {
-            severity: Severity::High,
-            kind: VulnerabilityKind::ExploitPossible,
-            confidence_score: base_confidence.max(75),
-        };
-    }
-
-    if exploitation_probability >= 0.7 {
-        return Resolution {
-            severity: Severity::High,
-            kind: VulnerabilityKind::HighRiskPattern,
-            confidence_score: base_confidence.max(70),
         };
     }
 
@@ -1174,6 +1170,32 @@ fn resolve_classification(
             severity: Severity::Info,
             kind: VulnerabilityKind::GenericContract,
             confidence_score: base_confidence.clamp(20, 35),
+        };
+    }
+
+    if fork_validated && has_exploit_path {
+        return Resolution {
+            severity: Severity::High,
+            kind: VulnerabilityKind::ExploitPossible,
+            confidence_score: base_confidence.max(82),
+        };
+    }
+
+    if has_exploit_path
+        && (exploitation_probability >= POSSIBLE_MIN_PROBABILITY || risk_adjusted_value > 0.0)
+    {
+        return Resolution {
+            severity: Severity::High,
+            kind: VulnerabilityKind::ExploitPossible,
+            confidence_score: base_confidence.max(75),
+        };
+    }
+
+    if exploitation_probability >= HIGH_RISK_MIN_PROBABILITY {
+        return Resolution {
+            severity: Severity::High,
+            kind: VulnerabilityKind::HighRiskPattern,
+            confidence_score: base_confidence.max(70),
         };
     }
 
@@ -1225,6 +1247,7 @@ fn build_description(
     proxy: &ProxyMetadata,
     has_exploit_path: bool,
     value_flow: ValueFlowHeuristics,
+    resolved_kind: &VulnerabilityKind,
 ) -> String {
     let mut segments = vec![format!(
         "Rust scanner executed against {} using {}.",
@@ -1289,8 +1312,12 @@ fn build_description(
         "eth_call simulation was disabled.".to_string()
     });
 
-    segments.push(if fork_validated {
+    segments.push(if matches!(resolved_kind, VulnerabilityKind::ExploitConfirmed) {
         "Fork validation confirmed a reachable unauthorized execution path.".to_string()
+    } else if fork_validated && has_exploit_path {
+        "Fork validation reached a candidate state-changing path, but confirmation thresholds for exploitability were not met.".to_string()
+    } else if fork_validated {
+        "Fork validation executed successfully, but did not satisfy the thresholds required to confirm exploitability.".to_string()
     } else if has_exploit_path {
         "Offensive analysis identified candidate exploit paths, but fork validation did not confirm a state-changing exploit.".to_string()
     } else {
