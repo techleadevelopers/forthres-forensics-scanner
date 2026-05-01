@@ -166,6 +166,12 @@ pub struct OffensiveSummary {
     pub recommended_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct SelectorPriority {
+    selector: [u8; 4],
+    score: u32,
+}
+
 // ============================================================
 // forthres OFFENSIVE ENGINE (FULL INTEGRATION)
 // ============================================================
@@ -299,15 +305,16 @@ impl forthresOffensiveEngine {
     
     /// Extract paths using symbolic execution
     async fn extract_paths_symbolic(&self, analysis: &BytecodeAnalysis) -> Result<Vec<ControlFlowPath>> {
-        let bytecode = &analysis.bytecode;
         let mut all_paths = Vec::new();
+        let prioritized_selectors = prioritize_symbolic_selectors(analysis, self.config.max_paths);
         
-        for selector in &analysis.function_selectors {
+        for candidate in prioritized_selectors {
+            let selector = candidate.selector;
             let result = self
                 .symbolic
                 .lock()
                 .expect("symbolic executor poisoned")
-                .execute(analysis, selector);
+                .execute(analysis, &selector);
             info!("  → Selector {}: {} paths, {} branches", 
                 hex::encode(selector), 
                 result.paths.len(),
@@ -316,19 +323,20 @@ impl forthresOffensiveEngine {
             
             // Convert symbolic paths to ControlFlowPath
             for sym_path in result.paths {
-                let path = self.convert_symbolic_to_controlflow(&sym_path, selector);
+                let path = self.convert_symbolic_to_controlflow(&sym_path, &selector);
                 if path.is_dangerous() {
                     all_paths.push(path);
                 }
             }
         }
         
-        Ok(all_paths)
+        Ok(prune_paths_by_priority(analysis, all_paths, self.config.max_paths))
     }
     
     /// Extract paths using static analysis (fallback)
     async fn extract_paths_static(&self, analysis: &BytecodeAnalysis) -> Result<Vec<ControlFlowPath>> {
-        Ok(find_exploit_paths(analysis, self.config.max_paths))
+        let paths = find_exploit_paths(analysis, self.config.max_paths * 2);
+        Ok(prune_paths_by_priority(analysis, paths, self.config.max_paths))
     }
     
     /// Calculate Bayesian probabilities for all paths
@@ -433,7 +441,8 @@ impl forthresOffensiveEngine {
     ) -> Vec<ExploitAttempt> {
         let mut all_attempts = Vec::new();
         
-        for path_value in paths.iter().take(10) {
+        let fuzz_budget = self.config.max_paths.min(10);
+        for path_value in paths.iter().take(fuzz_budget) {
             let attempts = self.run_fuzzing_for_path(path_value, contract).await;
             all_attempts.extend(attempts);
         }
@@ -696,6 +705,150 @@ impl OffensiveEngine {
 // ============================================================
 // CONVENIENCE FUNCTIONS
 // ============================================================
+
+fn prioritize_symbolic_selectors(
+    analysis: &BytecodeAnalysis,
+    max_paths: usize,
+) -> Vec<SelectorPriority> {
+    let mut ranked = analysis
+        .function_selectors
+        .iter()
+        .map(|selector| SelectorPriority {
+            selector: *selector,
+            score: selector_priority_score(analysis, selector),
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| hex::encode(left.selector).cmp(&hex::encode(right.selector)))
+    });
+
+    let selector_budget = max_paths.clamp(3, 12);
+    ranked.truncate(selector_budget.min(ranked.len()));
+    ranked
+}
+
+fn selector_priority_score(analysis: &BytecodeAnalysis, selector: &[u8; 4]) -> u32 {
+    let mut score = 12;
+
+    if let Some(function) = analysis.get_function_by_selector(selector) {
+        if function.is_dangerous {
+            score += 40;
+        }
+        if !function.has_access_control {
+            score += 15;
+        }
+
+        if let Some(block) = analysis
+            .basic_blocks
+            .iter()
+            .find(|block| function.offset >= block.start && function.offset <= block.end)
+        {
+            score += basic_block_priority_score(block);
+        }
+    }
+
+    if analysis.has_delegatecall {
+        score += 10;
+    }
+    if analysis.has_reentrancy_risk {
+        score += 8;
+    }
+    if analysis.has_upgrade_surface {
+        score += 8;
+    }
+    if analysis.has_admin_surface {
+        score += 6;
+    }
+    if analysis.has_fallback {
+        score += 4;
+    }
+
+    score
+}
+
+fn basic_block_priority_score(block: &crate::bytecode::BasicBlockInfo) -> u32 {
+    let mut score = (block.successors.len() as u32) * 3;
+    if block.instructions.iter().any(|inst| inst.mnemonic == "SSTORE") {
+        score += 10;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "CALL") {
+        score += 8;
+    }
+    if block
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst.mnemonic, "DELEGATECALL" | "CALLCODE"))
+    {
+        score += 12;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "SELFDESTRUCT") {
+        score += 20;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "JUMPI") {
+        score += 5;
+    }
+    score
+}
+
+fn prune_paths_by_priority(
+    analysis: &BytecodeAnalysis,
+    paths: Vec<ControlFlowPath>,
+    max_paths: usize,
+) -> Vec<ControlFlowPath> {
+    let mut ranked = paths
+        .into_iter()
+        .map(|path| {
+            let score = control_flow_path_score(analysis, &path);
+            (path, score)
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.entry_selector.cmp(&right.0.entry_selector))
+    });
+    ranked.truncate(max_paths.min(ranked.len()));
+    ranked.into_iter().map(|(path, _)| path).collect()
+}
+
+fn control_flow_path_score(analysis: &BytecodeAnalysis, path: &ControlFlowPath) -> u32 {
+    let mut score = 0;
+    score += (path.conditions.len() as u32) * 4;
+    score += (path.state_changes.len() as u32) * 6;
+    score += (path.basic_blocks.len() as u32) * 2;
+
+    for change in &path.state_changes {
+        match change {
+            StateChange::SelfDestruct(_) => score += 40,
+            StateChange::Delegatecall(_) => score += 20,
+            StateChange::Transfer(amount, _) if *amount > 0 => score += 18,
+            StateChange::StorageWrite(slot, _) if *slot == 0 => score += 14,
+            StateChange::Call(_, _, _) => score += 10,
+            _ => {}
+        }
+    }
+
+    if let Some(selector) = parse_entry_selector(&path.entry_selector) {
+        score += selector_priority_score(analysis, &selector);
+    }
+
+    score
+}
+
+fn parse_entry_selector(entry_selector: &str) -> Option<[u8; 4]> {
+    let raw = entry_selector.strip_prefix("0x").unwrap_or(entry_selector);
+    if raw.len() != 8 {
+        return None;
+    }
+    let decoded = hex::decode(raw).ok()?;
+    decoded.try_into().ok()
+}
 
 /// Quick analysis with default config
 pub async fn quick_analyze(
