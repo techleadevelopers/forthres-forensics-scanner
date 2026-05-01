@@ -101,8 +101,12 @@ struct ProxyMetadata {
 
 impl ProxyMetadata {
     fn proxy_type(&self) -> Option<&'static str> {
-        if self.implementation.is_some() || self.admin.is_some() || self.beacon.is_some() {
-            Some("EIP-1967")
+        if self.beacon.is_some() {
+            Some("EIP-1967 Beacon")
+        } else if self.implementation.is_some() && self.admin.is_some() {
+            Some("EIP-1967 Transparent")
+        } else if self.implementation.is_some() {
+            Some("EIP-1967/UUPS")
         } else {
             None
         }
@@ -1183,9 +1187,15 @@ fn opcode_capability_summary(analysis: &BytecodeAnalysis) -> String {
 }
 
 fn classify_dispatcher_confidence(analysis: &BytecodeAnalysis) -> DispatcherConfidence {
-    if analysis.function_selectors.len() >= 4 && analysis.basic_blocks.len() >= 8 {
+    if analysis.function_selectors.len() >= 4
+        && analysis.basic_blocks.len() >= 8
+        && analysis.dispatcher_targets >= 2
+    {
         DispatcherConfidence::High
-    } else if !analysis.function_selectors.is_empty() && analysis.basic_blocks.len() >= 3 {
+    } else if !analysis.function_selectors.is_empty()
+        && analysis.basic_blocks.len() >= 3
+        && analysis.dispatcher_targets >= 1
+    {
         DispatcherConfidence::Medium
     } else {
         DispatcherConfidence::Low
@@ -1193,19 +1203,11 @@ fn classify_dispatcher_confidence(analysis: &BytecodeAnalysis) -> DispatcherConf
 }
 
 fn detect_fallback(analysis: &BytecodeAnalysis) -> bool {
-    !analysis.function_selectors.is_empty()
-        && analysis
-            .basic_blocks
-            .iter()
-            .any(|block| block.instructions.iter().any(|inst| inst.mnemonic == "JUMPI"))
+    analysis.has_fallback
 }
 
 fn detect_receive(analysis: &BytecodeAnalysis) -> bool {
-    analysis
-        .basic_blocks
-        .iter()
-        .any(|block| block.instructions.iter().any(|inst| inst.mnemonic == "CALLVALUE"))
-        && !analysis.function_selectors.is_empty()
+    analysis.has_receive
 }
 
 fn capability_labels(
@@ -1217,10 +1219,10 @@ fn capability_labels(
     if value_flow.can_move_funds {
         capabilities.push("fund_movement".to_string());
     }
-    if proxy.is_proxy() || analysis.has_delegatecall || analysis.has_create2 {
+    if proxy.is_proxy() || analysis.has_upgrade_surface {
         capabilities.push("upgrade".to_string());
     }
-    if proxy.has_admin_control() || !analysis.access_controls.is_empty() {
+    if proxy.has_admin_control() || analysis.has_admin_surface {
         capabilities.push("auth".to_string());
     }
     if analysis.has_delegatecall || analysis.has_callcode || analysis.has_reentrancy_risk {
@@ -1266,6 +1268,11 @@ fn build_bytecode_confidence_report(
             label: "basic_blocks".to_string(),
             value: analysis.basic_blocks.len().to_string(),
             impact: "control-flow visibility".to_string(),
+        },
+        BytecodeSignalReport {
+            label: "dispatcher_targets".to_string(),
+            value: analysis.dispatcher_targets.to_string(),
+            impact: "jump-table resolution".to_string(),
         },
         BytecodeSignalReport {
             label: "dangerous_matches".to_string(),
