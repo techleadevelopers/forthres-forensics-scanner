@@ -7,6 +7,10 @@ edition = "2021"
 name = "ghost-scanner"
 path = "src/bin/hexora-scan.rs"
 
+[[bin]]
+name = "hexora-verify"
+path = "src/bin/hexora-verify.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
