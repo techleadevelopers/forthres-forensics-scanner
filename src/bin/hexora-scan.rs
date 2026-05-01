@@ -12,8 +12,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ghost-scanner",
-    about = "The Ghost Scanner - production EVM smart contract auditing engine",
+    name = "forthres",
+    about = "Forthres production EVM smart contract auditing engine",
     version = "0.2.0"
 )]
 struct Cli {
