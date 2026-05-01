@@ -1,5 +1,5 @@
 // src/offensive/feedback_loop.rs
-//! Hexora Guided Fuzzing Feedback Loop Engine
+//! forthres Guided Fuzzing Feedback Loop Engine
 //!
 //! Engine inteligente de descoberta de exploits usando:
 //! - Coverage-guided fuzzing com feedback de execução
@@ -355,10 +355,10 @@ impl MutationStrategy for CrossoverStrategy {
 }
 
 // ============================================================
-// NOVO: HEXORA GUIDED FUZZER
+// NOVO: forthres GUIDED FUZZER
 // ============================================================
 
-pub struct HexoraGuidedFuzzer {
+pub struct forthresGuidedFuzzer {
     coverage_map: HashMap<u64, u32>,
     energy_schedule: EnergySchedule,
     mutation_strategies: Vec<Box<dyn MutationStrategy>>,
@@ -366,7 +366,7 @@ pub struct HexoraGuidedFuzzer {
     last_coverage: u64,
 }
 
-impl HexoraGuidedFuzzer {
+impl forthresGuidedFuzzer {
     pub fn new() -> Self {
         let corpus = Arc::new(Mutex::new(Vec::new()));
         let strategies: Vec<Box<dyn MutationStrategy>> = vec![
@@ -515,7 +515,7 @@ impl HexoraGuidedFuzzer {
     }
 }
 
-impl Default for HexoraGuidedFuzzer {
+impl Default for forthresGuidedFuzzer {
     fn default() -> Self {
         Self::new()
     }
@@ -531,7 +531,7 @@ pub struct FeedbackLoopEngine {
     mutation_factor: f32,
     prune_threshold: f32,
     knowledge: KnowledgeBase,
-    fuzzer: HexoraGuidedFuzzer,
+    fuzzer: forthresGuidedFuzzer,
 }
 
 impl FeedbackLoopEngine {
@@ -542,7 +542,7 @@ impl FeedbackLoopEngine {
             mutation_factor,
             prune_threshold: 0.7,
             knowledge: KnowledgeBase::new(),
-            fuzzer: HexoraGuidedFuzzer::new(),
+            fuzzer: forthresGuidedFuzzer::new(),
         }
     }
 
@@ -1069,7 +1069,7 @@ mod tests {
     
     #[test]
     fn test_granular_scoring() {
-        let fuzzer = HexoraGuidedFuzzer::new();
+        let fuzzer = forthresGuidedFuzzer::new();
         let result = SimulationResult {
             success: true,
             state_changes: vec![StateChange::StorageWrite(0, "new_owner".to_string())],
