@@ -1,7 +1,11 @@
 [package]
-name = "ghost-scanner"
+name = "forthres"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "ghost_scanner"
+path = "src/lib.rs"
 
 [[bin]]
 name = "forthres"
