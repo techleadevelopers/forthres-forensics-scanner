@@ -1,5 +1,5 @@
 // src/offensive/mod.rs
-//! Hexora Offensive Security Engine - Main Module
+//! forthres Offensive Security Engine - Main Module
 //!
 //! Integrates all offensive analysis components:
 //! - Symbolic execution (path finding)
@@ -56,7 +56,7 @@ pub use economic_risk::{
 pub use mev_analysis::analyze_mev;
 
 pub use symbolic_analysis::{
-    HexoraSymbolicExecutor,
+    forthresSymbolicExecutor,
     SymbolicConfig,
     SymbolicExecutionResult,
     SymbolicPath,
@@ -69,7 +69,7 @@ pub use adaptive_feedback::{
     ExploitAttempt,
     SimulationResult,
     TestInput,
-    HexoraGuidedFuzzer,
+    forthresGuidedFuzzer,
 };
 
 // ============================================================
@@ -167,22 +167,22 @@ pub struct OffensiveSummary {
 }
 
 // ============================================================
-// HEXORA OFFENSIVE ENGINE (FULL INTEGRATION)
+// forthres OFFENSIVE ENGINE (FULL INTEGRATION)
 // ============================================================
 
-pub struct HexoraOffensiveEngine {
+pub struct forthresOffensiveEngine {
     config: OffensiveConfig,
     forensics: ForensicsEngine,
-    symbolic: Mutex<HexoraSymbolicExecutor>,
-    fuzzer: Arc<HexoraGuidedFuzzer>,
+    symbolic: Mutex<forthresSymbolicExecutor>,
+    fuzzer: Arc<forthresGuidedFuzzer>,
     economic: Arc<RealTimeEconomicEngine>,
     probability: Arc<BayesianProbabilityEngine>,
     rpc_semaphore: Arc<Semaphore>,
     result_cache: Arc<tokio::sync::Mutex<LruCache<String, OffensiveReport>>>,
 }
 
-impl HexoraOffensiveEngine {
-    /// Creates a new Hexora Offensive Engine with full integration
+impl forthresOffensiveEngine {
+    /// Creates a new forthres Offensive Engine with full integration
     pub fn new(config: OffensiveConfig, forensics: ForensicsEngine) -> Self {
         let symbolic_config = SymbolicConfig {
             max_paths: config.max_paths,
@@ -197,8 +197,8 @@ impl HexoraOffensiveEngine {
         Self {
             config: config.clone(),
             forensics: forensics.clone(),
-            symbolic: Mutex::new(HexoraSymbolicExecutor::new(symbolic_config)),
-            fuzzer: Arc::new(HexoraGuidedFuzzer::new()),
+            symbolic: Mutex::new(forthresSymbolicExecutor::new(symbolic_config)),
+            fuzzer: Arc::new(forthresGuidedFuzzer::new()),
             economic: Arc::new(RealTimeEconomicEngine::new(economic_config)),
             probability: Arc::new(BayesianProbabilityEngine::new(100, true)),
             rpc_semaphore: Arc::new(Semaphore::new(config.max_concurrent_analysis)),
@@ -509,7 +509,7 @@ impl HexoraOffensiveEngine {
     async fn generate_poc(&self, validated: &ValidatedExploit, contract: &str) -> Result<String> {
         let mut poc = String::new();
         
-        poc.push_str("// Hexora Auto-Generated Proof of Concept\n");
+        poc.push_str("// forthres Auto-Generated Proof of Concept\n");
         poc.push_str("// DO NOT USE ON MAINNET\n\n");
         
         poc.push_str("// SPDX-License-Identifier: MIT\n");
@@ -688,8 +688,8 @@ impl OffensiveEngine {
     }
 
     pub async fn analyze(&self, contract: &str, analysis: &BytecodeAnalysis) -> Result<OffensiveReport> {
-        let hexora_engine = HexoraOffensiveEngine::new(self.config.clone(), self.forensics.clone());
-        hexora_engine.analyze_full(contract, analysis).await
+        let forthres_engine = forthresOffensiveEngine::new(self.config.clone(), self.forensics.clone());
+        forthres_engine.analyze_full(contract, analysis).await
     }
 }
 
@@ -704,7 +704,7 @@ pub async fn quick_analyze(
     forensics: ForensicsEngine,
 ) -> Result<OffensiveReport> {
     let config = OffensiveConfig::default();
-    let engine = HexoraOffensiveEngine::new(config, forensics);
+    let engine = forthresOffensiveEngine::new(config, forensics);
     engine.analyze_full(contract, analysis).await
 }
 
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn test_offensive_engine_creation() {
         let forensics = ForensicsEngine::new(String::new(), Default::default());
-        let engine = HexoraOffensiveEngine::new(OffensiveConfig::default(), forensics);
+        let engine = forthresOffensiveEngine::new(OffensiveConfig::default(), forensics);
         assert!(engine.symbolic.lock().is_ok());
     }
 }
