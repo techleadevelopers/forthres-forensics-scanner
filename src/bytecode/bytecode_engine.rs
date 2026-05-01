@@ -1,5 +1,5 @@
 // src/bytecode.rs
-//! Hexora Bytecode Analysis Module
+//! forthres Bytecode Analysis Module
 //!
 //! Advanced EVM bytecode analysis with:
 //! - Full opcode detection (all dangerous patterns)
