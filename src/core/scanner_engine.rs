@@ -890,6 +890,7 @@ pub async fn scan_contract(
     let mut mev_opportunities = Vec::new();
     let mut exploitation_probability = 0.0;
     let mut risk_adjusted_value = 0.0;
+    let mut coverage_alignment_score = 0.0;
     
     let offensive_config = OffensiveConfig {
         max_paths: 10,
@@ -910,6 +911,7 @@ pub async fn scan_contract(
             mev_opportunities = offensive_report.mev_opportunities;
             exploitation_probability = offensive_report.exploitation_probability;
             risk_adjusted_value = offensive_report.risk_adjusted_value;
+            coverage_alignment_score = offensive_report.coverage_alignment_score;
             
             if !exploit_paths.is_empty() {
                 emit(log_event(
@@ -921,6 +923,15 @@ pub async fn scan_contract(
                     ),
                     "warn",
                 ));
+                if coverage_alignment_score > 0.0 {
+                    emit(log_event(
+                        format!(
+                            "Coverage-backed validation alignment reached {:.2}%",
+                            coverage_alignment_score * 100.0
+                        ),
+                        "info",
+                    ));
+                }
                 
                 for path in &exploit_paths {
                     emit(log_event(
@@ -1003,6 +1014,7 @@ pub async fn scan_contract(
         risk_adjusted_value,
         &resolution,
         &bytecode_confidence,
+        coverage_alignment_score,
         value_flow,
         &proxy,
     );
@@ -1074,6 +1086,7 @@ pub async fn scan_contract(
             state_change_summary: state_delta.clone(),
         },
         decision_traces,
+        coverage_alignment_score,
         exploit_paths,
         mev_opportunities,
         exploitation_probability,
@@ -1480,6 +1493,7 @@ fn build_decision_traces(
     risk_adjusted_value: f64,
     resolution: &Resolution,
     bytecode_confidence: &BytecodeConfidenceReport,
+    coverage_alignment_score: f64,
     value_flow: ValueFlowHeuristics,
     proxy: &ProxyMetadata,
 ) -> Vec<DecisionTraceReport> {
@@ -1525,6 +1539,18 @@ fn build_decision_traces(
                 proxy.is_proxy()
             ),
             weight: if value_flow.can_move_funds { 12 } else { 0 },
+        },
+        DecisionTraceReport {
+            title: "coverage_validation".to_string(),
+            detail: if coverage_alignment_score > 0.0 {
+                format!(
+                    "Structural coverage alignment confirmed at {:.2}% between symbolic path shape and concrete exploit execution.",
+                    coverage_alignment_score * 100.0
+                )
+            } else {
+                "No concrete structural coverage alignment was confirmed.".to_string()
+            },
+            weight: (coverage_alignment_score * 100.0).round() as i32,
         },
         DecisionTraceReport {
             title: "resolution".to_string(),
