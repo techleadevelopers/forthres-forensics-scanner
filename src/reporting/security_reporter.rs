@@ -213,6 +213,7 @@ pub struct VulnerabilityReport {
     pub bytecode_confidence: BytecodeConfidenceReport,
     pub fork_validation: ForkValidationReport,
     pub decision_traces: Vec<DecisionTraceReport>,
+    pub coverage_alignment_score: f64,
     // NOVOS CAMPOS OFENSIVOS
     pub exploit_paths: Vec<ExploitPathReport>,
     pub mev_opportunities: Vec<MevOpportunityReport>,
@@ -370,14 +371,15 @@ impl VulnerabilityReport {
         };
 
         let fork_validation_section = format!(
-            "\n## Fork Validation\n\n- Attempted: `{}`\n- Strategy: `{}`\n- Provider: `{}`\n- Confirmed: `{}`\n- Selectors Tested: `{}`\n- Reason: `{}`\n- State Change Summary: `{}`\n",
+            "\n## Fork Validation\n\n- Attempted: `{}`\n- Strategy: `{}`\n- Provider: `{}`\n- Confirmed: `{}`\n- Selectors Tested: `{}`\n- Reason: `{}`\n- State Change Summary: `{}`\n- Coverage Alignment Score: `{:.2}%`\n",
             if self.fork_validation.attempted { "yes" } else { "no" },
             self.fork_validation.strategy,
             self.fork_validation.provider,
             if self.fork_validation.confirmed { "yes" } else { "no" },
             self.fork_validation.selectors_tested,
             self.fork_validation.reason,
-            self.fork_validation.state_change_summary.as_deref().unwrap_or("none")
+            self.fork_validation.state_change_summary.as_deref().unwrap_or("none"),
+            self.coverage_alignment_score * 100.0
         );
 
         let decision_traces_section = if self.decision_traces.is_empty() {
@@ -450,9 +452,10 @@ impl VulnerabilityReport {
 
         // NOVA SEÇÃO: Resumo Ofensivo
         let offensive_summary = format!(
-            "\n## Offensive Analysis Summary\n\n- **Exploitation Probability:** `{:.2}%`\n- **Risk-Adjusted Value:** `{:.6} ETH`\n- **Recommendation:** `{}`\n",
+            "\n## Offensive Analysis Summary\n\n- **Exploitation Probability:** `{:.2}%`\n- **Risk-Adjusted Value:** `{:.6} ETH`\n- **Coverage Alignment:** `{:.2}%`\n- **Recommendation:** `{}`\n",
             self.exploitation_probability * 100.0,
             self.risk_adjusted_value,
+            self.coverage_alignment_score * 100.0,
             self.recommendation
         );
 
