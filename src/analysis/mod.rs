@@ -141,6 +141,7 @@ pub struct ValidatedExploit {
     pub path: SymbolicPath,
     pub exploit: ExploitAttempt,
     pub confidence: f64,
+    pub coverage_alignment: f64,
     pub feasibility: bool,
 }
 
@@ -150,6 +151,7 @@ pub struct OffensiveReport {
     pub mev_opportunities: Vec<MevOpportunity>,
     pub exploitation_probability: f64,
     pub risk_adjusted_value: f64,
+    pub coverage_alignment_score: f64,
     pub validated_exploits: Vec<ValidatedExploit>,
     pub proof_of_concept: Option<String>,
     pub analysis_time_ms: u128,
@@ -275,6 +277,10 @@ impl forthresOffensiveEngine {
             mev_opportunities,
             exploitation_probability: summary.max_confidence,
             risk_adjusted_value: summary.total_economic_value_eth * summary.max_confidence,
+            coverage_alignment_score: validated
+                .iter()
+                .map(|entry| entry.coverage_alignment)
+                .fold(0.0, f64::max),
             validated_exploits: validated,
             proof_of_concept: poc,
             analysis_time_ms,
@@ -482,8 +488,12 @@ impl forthresOffensiveEngine {
         
         for sym_path in symbolic_paths {
             for exploit in concrete_exploits {
-                if sym_path.entry_selector == exploit.selector {
-                    let feasible = self.check_feasibility(sym_path, exploit).await;
+                if selectors_match(&sym_path.entry_selector, &exploit.selector) {
+                    let path_coverage = structural_coverage_signature(sym_path);
+                    let coverage_alignment = coverage_alignment_score(path_coverage, exploit.coverage_bits);
+                    let feasible = self
+                        .check_feasibility(sym_path, exploit, coverage_alignment)
+                        .await;
                     
                     if feasible {
                         validated.push(ValidatedExploit {
@@ -498,7 +508,11 @@ impl forthresOffensiveEngine {
                                 depth: 0,
                             },
                             exploit: exploit.clone(),
-                            confidence: exploit.confidence as f64,
+                            confidence: boosted_validation_confidence(
+                                exploit.confidence as f64,
+                                coverage_alignment,
+                            ),
+                            coverage_alignment,
                             feasibility: true,
                         });
                     }
@@ -506,12 +520,25 @@ impl forthresOffensiveEngine {
             }
         }
         
+        validated.sort_by(|left, right| {
+            right
+                .confidence
+                .total_cmp(&left.confidence)
+                .then_with(|| right.exploit.score.total_cmp(&left.exploit.score))
+        });
         validated
     }
     
-    async fn check_feasibility(&self, _sym_path: &ControlFlowPath, exploit: &ExploitAttempt) -> bool {
-        // Simple feasibility check based on score
-        exploit.score > 0.3 && exploit.success
+    async fn check_feasibility(
+        &self,
+        sym_path: &ControlFlowPath,
+        exploit: &ExploitAttempt,
+        coverage_alignment: f64,
+    ) -> bool {
+        let structural_bits = structural_coverage_signature(sym_path).count_ones() as usize;
+        exploit.score > 0.3
+            && exploit.success
+            && (coverage_alignment >= 0.18 || (structural_bits <= 2 && exploit.coverage_bits != 0))
     }
     
     /// Generate PoC for an exploit
@@ -839,6 +866,70 @@ fn control_flow_path_score(analysis: &BytecodeAnalysis, path: &ControlFlowPath) 
     }
 
     score
+}
+
+fn selectors_match(path_selector: &str, exploit_selector: &str) -> bool {
+    normalize_selector(path_selector) == normalize_selector(exploit_selector)
+}
+
+fn normalize_selector(selector: &str) -> String {
+    selector.strip_prefix("0x").unwrap_or(selector).to_ascii_lowercase()
+}
+
+fn structural_coverage_signature(path: &ControlFlowPath) -> u64 {
+    let mut bits = 0u64;
+
+    if !path.basic_blocks.is_empty() {
+        bits |= 1;
+    }
+    if path.basic_blocks.len() > 2 {
+        bits |= 1 << 1;
+    }
+    if path
+        .conditions
+        .iter()
+        .any(|condition| matches!(condition, Condition::CallerEq(_) | Condition::CallerEqStorage(_)))
+    {
+        bits |= 1 << 2;
+    }
+    if path
+        .conditions
+        .iter()
+        .any(|condition| matches!(condition, Condition::ValueGt(_) | Condition::ValueLt(_)))
+    {
+        bits |= 1 << 3;
+    }
+
+    for change in &path.state_changes {
+        match change {
+            StateChange::StorageWrite(slot, _) => {
+                bits |= 1 << 4;
+                bits |= 1u64 << (8 + (*slot as usize % 16));
+            }
+            StateChange::Delegatecall(_) => bits |= 1 << 24,
+            StateChange::SelfDestruct(_) => bits |= 1 << 25,
+            StateChange::Call(_, _, _) => bits |= 1 << 26,
+            StateChange::Transfer(amount, _) if *amount > 0 => bits |= 1 << 27,
+            _ => {}
+        }
+    }
+
+    bits
+}
+
+fn coverage_alignment_score(path_bits: u64, exploit_bits: u64) -> f64 {
+    let union = path_bits | exploit_bits;
+    if union == 0 {
+        return 0.0;
+    }
+
+    let overlap = (path_bits & exploit_bits).count_ones() as f64;
+    let union_count = union.count_ones() as f64;
+    overlap / union_count
+}
+
+fn boosted_validation_confidence(base_confidence: f64, coverage_alignment: f64) -> f64 {
+    (base_confidence * (0.75 + coverage_alignment)).clamp(0.0, 1.0)
 }
 
 fn parse_entry_selector(entry_selector: &str) -> Option<[u8; 4]> {
