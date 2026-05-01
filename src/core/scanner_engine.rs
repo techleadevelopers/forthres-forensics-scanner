@@ -15,9 +15,9 @@ use crate::forensics::ForensicsEngine;
 use crate::load_balancer::{LoadBalancer, WsConnectionRequest};
 use crate::offensive::{OffensiveConfig, OffensiveEngine};
 use crate::reporter::{
-    BehavioralKind, BehavioralRiskReport, EndpointHealthSnapshot, EvidenceReport, ProxyReport,
-    ScannerStatusSnapshot, Severity, ValueFlowReport, VulnerabilityKind, VulnerabilityReport,
-    VulnerabilityReporter,
+    BehavioralKind, BehavioralRiskReport, BytecodeConfidenceReport, BytecodeSignalReport,
+    DecisionTraceReport, EndpointHealthSnapshot, EvidenceReport, ForkValidationReport, ProxyReport,
+    ScannerStatusSnapshot, Severity, ValueFlowReport, VulnerabilityKind, VulnerabilityReport, VulnerabilityReporter,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +122,23 @@ struct Resolution {
     severity: Severity,
     kind: VulnerabilityKind,
     confidence_score: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DispatcherConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl DispatcherConfidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            DispatcherConfidence::High => "HIGH",
+            DispatcherConfidence::Medium => "MEDIUM",
+            DispatcherConfidence::Low => "LOW",
+        }
+    }
 }
 
 const STANDARD_TOKEN_SELECTORS: [&str; 6] = [
@@ -723,6 +740,7 @@ pub async fn scan_contract(
 
     let mut fork_validated = false;
     let mut state_delta: Option<String> = None;
+    let mut fork_reason = "Fork was not attempted".to_string();
 
     if should_run_fork {
     emit(step_event("fork", "Anvil fork execution", "running"));
@@ -740,11 +758,13 @@ pub async fn scan_contract(
                         fork_validated = result.unauthorized_access || result.balance_drained || result.ownership_changed;
                         state_delta = Some(result.state_delta);
                         if fork_validated {
+                            fork_reason = "Fork replay produced a reachable unauthorized execution path".to_string();
                             emit(log_event(
                                 "Fork validation confirmed a reachable unauthorized execution path".to_string(),
                                 "warn",
                             ));
                         } else {
+                            fork_reason = "Fork executed but did not produce a confirming state change".to_string();
                             emit(log_event(
                                 "Fork validation completed without exploitable state change".to_string(),
                                 "info",
@@ -752,6 +772,7 @@ pub async fn scan_contract(
                         }
                     }
                     Ok(None) => {
+                        fork_reason = "Fork provider unavailable; advanced RPC evidence retained".to_string();
                         emit(log_event(
                             "Fork não disponível — usando análise RPC".to_string(),
                             "info",
@@ -760,6 +781,7 @@ pub async fn scan_contract(
                         state_delta = rpc_state_delta.map(|v| v.to_string());
                     }
                     Err(error) => {
+                        fork_reason = format!("Fork validation failed; advanced RPC fallback retained: {error}");
                         emit(log_event(format!("Fork validation failed: {error}"), "warn"));
                         fork_validated = rpc_found_exploit;
                         state_delta = rpc_state_delta.map(|v| v.to_string());
@@ -768,6 +790,7 @@ pub async fn scan_contract(
             } else {
                 // 🔥 Contrato é PROTEGIDO (onlyOwner detectado)
                 fork_validated = false;
+                fork_reason = "Advanced RPC analysis determined privileged paths are access controlled".to_string();
                 emit(log_event(
                     "✅ Contrato é PROTEGIDO por onlyOwner. Não é explorável publicamente.".to_string(),
                     "info",
@@ -775,6 +798,7 @@ pub async fn scan_contract(
             }
         }
         Err(error) => {
+            fork_reason = format!("Advanced RPC analysis failed before fork replay: {}", error);
             emit(log_event(
                 format!("Advanced RPC analysis failed: {}", error),
                 "warn",
@@ -788,16 +812,21 @@ pub async fn scan_contract(
                     fork_validated = result.unauthorized_access || result.balance_drained || result.ownership_changed;
                     state_delta = Some(result.state_delta);
                     if fork_validated {
+                        fork_reason = "Fallback direct fork replay confirmed a state-changing path".to_string();
                         emit(log_event(
                             "Fork validation confirmed a reachable unauthorized execution path".to_string(),
                             "warn",
                         ));
+                    } else {
+                        fork_reason = "Fallback direct fork replay ran without confirming exploitability".to_string();
                     }
                 }
                 Ok(None) => {
+                    fork_reason = "Fallback fork provider unavailable".to_string();
                     emit(log_event("Fork não disponível".to_string(), "info"));
                 }
                 Err(e) => {
+                    fork_reason = format!("Fallback fork validation failed: {}", e);
                     emit(log_event(format!("Fork validation failed: {}", e), "warn"));
                 }
             }
@@ -805,6 +834,7 @@ pub async fn scan_contract(
     }
     emit(step_event("fork", "Anvil fork execution", "done"));
 } else {
+    fork_reason = format!("Fork skipped because confidence {provisional_score}/100 is below threshold");
     emit(step_event("fork", "Anvil fork execution", "skipped"));
     emit(log_event(
         format!("Fork skipped because confidence {provisional_score}/100 is below threshold"),
@@ -915,6 +945,7 @@ pub async fn scan_contract(
     let simulation_only = request.simulation && !fork_validated;
     let value_flow = infer_value_flow(&selectors, proxy.is_proxy());
     let behavioral_risk = infer_behavioral_risk(value_flow, simulation, proxy.is_proxy(), !exploit_paths.is_empty());
+    let bytecode_confidence = build_bytecode_confidence_report(&analysis, &dangerous_matches, value_flow, &proxy);
     let final_kind = if matches!(resolution.kind, VulnerabilityKind::GenericContract)
         && matches!(behavioral_risk.kind, BehavioralKind::ExecutorContract)
     {
@@ -922,6 +953,19 @@ pub async fn scan_contract(
     } else {
         resolution.kind.clone()
     };
+    let decision_traces = build_decision_traces(
+        &dangerous_matches,
+        simulation,
+        fork_validated,
+        should_run_fork,
+        &fork_reason,
+        exploitation_probability,
+        risk_adjusted_value,
+        &resolution,
+        &bytecode_confidence,
+        value_flow,
+        &proxy,
+    );
 
     let report = VulnerabilityReport {
         id: uuid::Uuid::new_v4().to_string(),
@@ -946,8 +990,8 @@ pub async fn scan_contract(
             &final_kind,
         ),
         function_selector: selectors.first().cloned(),
-        flagged_selectors: selectors,
-        state_delta: state_delta.map(|s| s.to_string()),
+        flagged_selectors: selectors.clone(),
+        state_delta: state_delta.clone(),
         timestamp: Utc::now(),
         fork_validated,
         confidence_score: resolution.confidence_score,
@@ -967,6 +1011,29 @@ pub async fn scan_contract(
             score: behavioral_risk.score,
             rationale: behavioral_risk.rationale.to_string(),
         },
+        bytecode_confidence,
+        fork_validation: ForkValidationReport {
+            attempted: should_run_fork,
+            strategy: match request.fork {
+                ForkMode::Force => "FORCED_FORK",
+                ForkMode::Auto => "AUTO_FORK",
+                ForkMode::Off => "FORK_DISABLED",
+            }.to_string(),
+            provider: if should_run_fork {
+                if request.fork == ForkMode::Force {
+                    "TENDERLY_OR_CONFIGURED_FORK".to_string()
+                } else {
+                    "ANVIL_OR_CONFIGURED_FORK".to_string()
+                }
+            } else {
+                "NOT_USED".to_string()
+            },
+            confirmed: fork_validated,
+            selectors_tested: selectors.len(),
+            reason: fork_reason,
+            state_change_summary: state_delta.clone(),
+        },
+        decision_traces,
         exploit_paths,
         mev_opportunities,
         exploitation_probability,
@@ -1113,6 +1180,197 @@ fn opcode_capability_summary(analysis: &BytecodeAnalysis) -> String {
             byte_len
         )
     }
+}
+
+fn classify_dispatcher_confidence(analysis: &BytecodeAnalysis) -> DispatcherConfidence {
+    if analysis.function_selectors.len() >= 4 && analysis.basic_blocks.len() >= 8 {
+        DispatcherConfidence::High
+    } else if !analysis.function_selectors.is_empty() && analysis.basic_blocks.len() >= 3 {
+        DispatcherConfidence::Medium
+    } else {
+        DispatcherConfidence::Low
+    }
+}
+
+fn detect_fallback(analysis: &BytecodeAnalysis) -> bool {
+    !analysis.function_selectors.is_empty()
+        && analysis
+            .basic_blocks
+            .iter()
+            .any(|block| block.instructions.iter().any(|inst| inst.mnemonic == "JUMPI"))
+}
+
+fn detect_receive(analysis: &BytecodeAnalysis) -> bool {
+    analysis
+        .basic_blocks
+        .iter()
+        .any(|block| block.instructions.iter().any(|inst| inst.mnemonic == "CALLVALUE"))
+        && !analysis.function_selectors.is_empty()
+}
+
+fn capability_labels(
+    analysis: &BytecodeAnalysis,
+    value_flow: ValueFlowHeuristics,
+    proxy: &ProxyMetadata,
+) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    if value_flow.can_move_funds {
+        capabilities.push("fund_movement".to_string());
+    }
+    if proxy.is_proxy() || analysis.has_delegatecall || analysis.has_create2 {
+        capabilities.push("upgrade".to_string());
+    }
+    if proxy.has_admin_control() || !analysis.access_controls.is_empty() {
+        capabilities.push("auth".to_string());
+    }
+    if analysis.has_delegatecall || analysis.has_callcode || analysis.has_reentrancy_risk {
+        capabilities.push("external_call".to_string());
+    }
+    capabilities
+}
+
+fn build_bytecode_confidence_report(
+    analysis: &BytecodeAnalysis,
+    dangerous_matches: &[String],
+    value_flow: ValueFlowHeuristics,
+    proxy: &ProxyMetadata,
+) -> BytecodeConfidenceReport {
+    let dispatcher_confidence = classify_dispatcher_confidence(analysis);
+    let fallback_detected = detect_fallback(analysis);
+    let receive_detected = detect_receive(analysis);
+    let access_control_score = if analysis.functions.is_empty() {
+        0
+    } else {
+        ((analysis.functions.iter().filter(|f| f.has_access_control).count() * 100)
+            / analysis.functions.len()) as u32
+    };
+
+    let mut score = analysis.risk_score.min(100);
+    score = score.saturating_add((analysis.basic_blocks.len().min(20) as u32) / 2);
+    score = score.saturating_add((dangerous_matches.len().min(5) as u32) * 4);
+    if matches!(dispatcher_confidence, DispatcherConfidence::High) {
+        score = score.saturating_add(10);
+    }
+    if proxy.is_proxy() {
+        score = score.saturating_add(5);
+    }
+    score = score.min(100);
+
+    let signals = vec![
+        BytecodeSignalReport {
+            label: "selectors".to_string(),
+            value: analysis.function_selectors.len().to_string(),
+            impact: "dispatcher coverage".to_string(),
+        },
+        BytecodeSignalReport {
+            label: "basic_blocks".to_string(),
+            value: analysis.basic_blocks.len().to_string(),
+            impact: "control-flow visibility".to_string(),
+        },
+        BytecodeSignalReport {
+            label: "dangerous_matches".to_string(),
+            value: dangerous_matches.len().to_string(),
+            impact: "high-risk selector surface".to_string(),
+        },
+        BytecodeSignalReport {
+            label: "access_control_score".to_string(),
+            value: access_control_score.to_string(),
+            impact: "authorization coverage".to_string(),
+        },
+    ];
+
+    BytecodeConfidenceReport {
+        score,
+        dispatcher_confidence: dispatcher_confidence.as_str().to_string(),
+        function_count: analysis.function_selectors.len(),
+        basic_block_count: analysis.basic_blocks.len(),
+        fallback_detected,
+        receive_detected,
+        access_control_score,
+        summary: format!(
+            "Dispatcher confidence={} selectors={} basicBlocks={} dangerousMatches={}.",
+            dispatcher_confidence.as_str(),
+            analysis.function_selectors.len(),
+            analysis.basic_blocks.len(),
+            dangerous_matches.len()
+        ),
+        capabilities: capability_labels(analysis, value_flow, proxy),
+        signals,
+    }
+}
+
+fn build_decision_traces(
+    dangerous_matches: &[String],
+    simulation: SimulationOutcome,
+    fork_validated: bool,
+    should_run_fork: bool,
+    fork_reason: &str,
+    exploitation_probability: f64,
+    risk_adjusted_value: f64,
+    resolution: &Resolution,
+    bytecode_confidence: &BytecodeConfidenceReport,
+    value_flow: ValueFlowHeuristics,
+    proxy: &ProxyMetadata,
+) -> Vec<DecisionTraceReport> {
+    let mut traces = vec![
+        DecisionTraceReport {
+            title: "bytecode_model".to_string(),
+            detail: bytecode_confidence.summary.clone(),
+            weight: bytecode_confidence.score as i32,
+        },
+        DecisionTraceReport {
+            title: "selector_surface".to_string(),
+            detail: if dangerous_matches.is_empty() {
+                "No dangerous selector signatures matched.".to_string()
+            } else {
+                format!("Dangerous selectors: {}", dangerous_matches.join("; "))
+            },
+            weight: (dangerous_matches.len() as i32) * 8,
+        },
+        DecisionTraceReport {
+            title: "simulation".to_string(),
+            detail: format!(
+                "Simulation attempts={} successes={} reverts={}",
+                simulation.attempts, simulation.successes, simulation.reverts
+            ),
+            weight: if simulation.has_confirmed_execution() { 10 } else { -5 },
+        },
+        DecisionTraceReport {
+            title: "fork_validation".to_string(),
+            detail: if should_run_fork {
+                fork_reason.to_string()
+            } else {
+                "Fork pipeline skipped by confidence gate.".to_string()
+            },
+            weight: if fork_validated { 20 } else { 0 },
+        },
+        DecisionTraceReport {
+            title: "value_flow".to_string(),
+            detail: format!(
+                "role={} canMoveFunds={} riskSurface={} proxy={}",
+                value_flow.role.as_str(),
+                value_flow.can_move_funds,
+                value_flow.risk_surface.as_str(),
+                proxy.is_proxy()
+            ),
+            weight: if value_flow.can_move_funds { 12 } else { 0 },
+        },
+        DecisionTraceReport {
+            title: "resolution".to_string(),
+            detail: format!(
+                "severity={} kind={} confidence={} probability={:.2}% rav={:.4}ETH",
+                resolution.severity,
+                resolution.kind,
+                resolution.confidence_score,
+                exploitation_probability * 100.0,
+                risk_adjusted_value
+            ),
+            weight: resolution.confidence_score as i32,
+        },
+    ];
+
+    traces.sort_by(|a, b| b.weight.cmp(&a.weight));
+    traces
 }
 
 fn calculate_confidence(
