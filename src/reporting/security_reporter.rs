@@ -143,6 +143,49 @@ pub struct BehavioralRiskReport {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BytecodeSignalReport {
+    pub label: String,
+    pub value: String,
+    pub impact: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BytecodeConfidenceReport {
+    pub score: u32,
+    pub dispatcher_confidence: String,
+    pub function_count: usize,
+    pub basic_block_count: usize,
+    pub fallback_detected: bool,
+    pub receive_detected: bool,
+    pub access_control_score: u32,
+    pub summary: String,
+    pub capabilities: Vec<String>,
+    pub signals: Vec<BytecodeSignalReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkValidationReport {
+    pub attempted: bool,
+    pub strategy: String,
+    pub provider: String,
+    pub confirmed: bool,
+    pub selectors_tested: usize,
+    pub reason: String,
+    pub state_change_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionTraceReport {
+    pub title: String,
+    pub detail: String,
+    pub weight: i32,
+}
+
 // ============================================================
 // VULNERABILITY REPORT COM CAMPOS OFENSIVOS
 // ============================================================
@@ -167,6 +210,9 @@ pub struct VulnerabilityReport {
     pub evidence: EvidenceReport,
     pub value_flow: ValueFlowReport,
     pub behavioral_risk: BehavioralRiskReport,
+    pub bytecode_confidence: BytecodeConfidenceReport,
+    pub fork_validation: ForkValidationReport,
+    pub decision_traces: Vec<DecisionTraceReport>,
     // NOVOS CAMPOS OFENSIVOS
     pub exploit_paths: Vec<ExploitPathReport>,
     pub mev_opportunities: Vec<MevOpportunityReport>,
@@ -293,6 +339,60 @@ impl VulnerabilityReport {
             self.behavioral_risk.rationale
         );
 
+        let bytecode_confidence_section = format!(
+            "\n## Bytecode Confidence\n\n- Score: `{}`\n- Dispatcher Confidence: `{}`\n- Function Count: `{}`\n- Basic Blocks: `{}`\n- Fallback Detected: `{}`\n- Receive Detected: `{}`\n- Access Control Score: `{}`\n- Capabilities: `{}`\n- Summary: `{}`\n",
+            self.bytecode_confidence.score,
+            self.bytecode_confidence.dispatcher_confidence,
+            self.bytecode_confidence.function_count,
+            self.bytecode_confidence.basic_block_count,
+            if self.bytecode_confidence.fallback_detected { "yes" } else { "no" },
+            if self.bytecode_confidence.receive_detected { "yes" } else { "no" },
+            self.bytecode_confidence.access_control_score,
+            if self.bytecode_confidence.capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                self.bytecode_confidence.capabilities.join(", ")
+            },
+            self.bytecode_confidence.summary
+        );
+
+        let bytecode_signals_section = if self.bytecode_confidence.signals.is_empty() {
+            "\n## Bytecode Signals\n\n- none\n".to_string()
+        } else {
+            let mut section = String::from("\n## Bytecode Signals\n\n");
+            for signal in &self.bytecode_confidence.signals {
+                section.push_str(&format!(
+                    "- **{}**: `{}` ({})\n",
+                    signal.label, signal.value, signal.impact
+                ));
+            }
+            section
+        };
+
+        let fork_validation_section = format!(
+            "\n## Fork Validation\n\n- Attempted: `{}`\n- Strategy: `{}`\n- Provider: `{}`\n- Confirmed: `{}`\n- Selectors Tested: `{}`\n- Reason: `{}`\n- State Change Summary: `{}`\n",
+            if self.fork_validation.attempted { "yes" } else { "no" },
+            self.fork_validation.strategy,
+            self.fork_validation.provider,
+            if self.fork_validation.confirmed { "yes" } else { "no" },
+            self.fork_validation.selectors_tested,
+            self.fork_validation.reason,
+            self.fork_validation.state_change_summary.as_deref().unwrap_or("none")
+        );
+
+        let decision_traces_section = if self.decision_traces.is_empty() {
+            "\n## Decision Traces\n\n- none\n".to_string()
+        } else {
+            let mut section = String::from("\n## Decision Traces\n\n");
+            for trace in &self.decision_traces {
+                section.push_str(&format!(
+                    "- **{}**: {} (weight `{}`)\n",
+                    trace.title, trace.detail, trace.weight
+                ));
+            }
+            section
+        };
+
         // NOVA SEÇÃO: Exploit Paths
         let exploit_paths_section = if self.exploit_paths.is_empty() {
             "No exploit paths identified.\n".to_string()
@@ -357,7 +457,7 @@ impl VulnerabilityReport {
         );
 
         format!(
-            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Chain: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n{}{}{}{}\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n{}{}{}",
+            "# Ghost Scanner Vulnerability Report\n\n## Summary\n\n- Report ID: `{}`\n- Chain: `{}`\n- Contract: `{}`\n- Transaction: `{}`\n- Severity: `{}`\n- Kind: `{}`\n- Confidence: `{}`\n- Fork validated: `{}`\n- Timestamp: `{}`\n\n## Description\n\n{}\n{}{}{}{}{}{}{}{}\n## Flagged Selectors\n\n{}\n\n## State Delta\n\n```\n{}\n```\n{}{}{}",
             self.id,
             self.chain,
             self.contract_address,
@@ -372,6 +472,10 @@ impl VulnerabilityReport {
             evidence_section,
             value_flow_section,
             behavioral_section,
+            bytecode_confidence_section,
+            bytecode_signals_section,
+            fork_validation_section,
+            decision_traces_section,
             selectors,
             self.state_delta.as_deref().unwrap_or("No state delta recorded"),
             exploit_paths_section,
