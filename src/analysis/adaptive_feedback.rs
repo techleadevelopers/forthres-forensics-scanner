@@ -156,6 +156,7 @@ pub struct SimulationResult {
     pub return_data: Vec<u8>,
     pub execution_time_ms: u64,
     pub coverage_new: CoverageDelta,
+    pub coverage_bits: u64,
     pub economic_value_eth: f64,
     pub ownership_changed: bool,
     pub delegatecall_to_proxy: bool,
@@ -675,8 +676,8 @@ impl FeedbackLoopEngine {
                     // Update corpus if new coverage
                     if !matches!(result.coverage_new, CoverageDelta::NoNew) {
                         let mut new_input = candidate.clone();
-                        new_input.coverage_bits = self.calculate_coverage_bits(&result);
-                        if self.fuzzer.update_corpus(new_input, candidate.coverage_bits) {
+                        new_input.coverage_bits = result.coverage_bits;
+                        if self.fuzzer.update_corpus(new_input.clone(), new_input.coverage_bits) {
                             tracing::debug!("📚 Added to corpus (new coverage)");
                             consecutive_no_progress = 0;
                         } else {
@@ -908,11 +909,15 @@ impl FeedbackLoopEngine {
                 let ownership_changed = self.detect_ownership_change(&storage_before, &storage_after);
                 let delegatecall_detected = self.detect_delegatecall(&result);
                 
-                let coverage_new = self.calculate_coverage_delta(&result);
-                let coverage_bits = self.calculate_coverage_bits_from_result(&result);
-                
-                let mut input_with_coverage = input.clone();
-                input_with_coverage.coverage_bits = coverage_bits;
+                let coverage_bits = self.calculate_coverage_bits(
+                    &path_value.path,
+                    &state_changes,
+                    &result,
+                    ownership_changed,
+                    delegatecall_detected,
+                    &observed_slots,
+                );
+                let coverage_new = self.calculate_coverage_delta(input.coverage_bits, coverage_bits);
                 
                 Ok(SimulationResult {
                     success: true,
@@ -922,6 +927,7 @@ impl FeedbackLoopEngine {
                     return_data: hex::decode(result.trim_start_matches("0x")).unwrap_or_default(),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                     coverage_new,
+                    coverage_bits,
                     economic_value_eth: path_value.economic_value_eth,
                     ownership_changed,
                     delegatecall_to_proxy: delegatecall_detected,
@@ -937,6 +943,7 @@ impl FeedbackLoopEngine {
                     return_data: Vec::new(),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                     coverage_new: CoverageDelta::NoNew,
+                    coverage_bits: input.coverage_bits,
                     economic_value_eth: 0.0,
                     ownership_changed: false,
                     delegatecall_to_proxy: false,
@@ -992,40 +999,82 @@ impl FeedbackLoopEngine {
         result.contains("delegatecall") || result.contains("0xf4")
     }
     
-    fn calculate_coverage_delta(&self, result: &str) -> CoverageDelta {
-        // Simula detecção de novas coberturas baseado no resultado
-        if result.contains("new_block") {
-            CoverageDelta::NewBasicBlock(fastrand::u64(..))
-        } else if result.contains("new_edge") {
-            CoverageDelta::NewEdge(fastrand::u64(..))
-        } else {
-            CoverageDelta::NoNew
+    fn calculate_coverage_delta(&self, previous_bits: u64, current_bits: u64) -> CoverageDelta {
+        let new_bits = current_bits & !previous_bits;
+        if new_bits == 0 {
+            return CoverageDelta::NoNew;
+        }
+
+        let discovered = (0..64)
+            .filter(|bit| ((new_bits >> bit) & 1) == 1)
+            .map(|bit| bit as u64)
+            .collect::<Vec<_>>();
+
+        match discovered.len() {
+            0 => CoverageDelta::NoNew,
+            1 => CoverageDelta::NewBasicBlock(discovered[0]),
+            2 => CoverageDelta::NewEdge(discovered[0] ^ discovered[1]),
+            _ => CoverageDelta::Multiple(discovered),
         }
     }
     
-    fn calculate_coverage_bits_from_result(&self, result: &str) -> u64 {
+    fn calculate_coverage_bits(
+        &self,
+        path: &ControlFlowPath,
+        state_changes: &[StateChange],
+        return_data: &str,
+        ownership_changed: bool,
+        delegatecall_detected: bool,
+        observed_slots: &[u64],
+    ) -> u64 {
         let mut bits = 0u64;
-        for (i, c) in result.chars().take(64).enumerate() {
-            if c as u8 % 2 == 0 {
-                bits |= 1 << (i % 64);
-            }
-        }
-        bits
-    }
-    
-    fn calculate_coverage_bits(&self, result: &SimulationResult) -> u64 {
-        let mut bits = 0u64;
-        if result.success {
+        if !return_data.is_empty() && return_data != "0x" {
             bits |= 1;
         }
-        if result.ownership_changed {
+        if ownership_changed {
             bits |= 1 << 1;
         }
-        if result.delegatecall_to_proxy {
+        if delegatecall_detected {
             bits |= 1 << 2;
         }
-        if result.economic_value_eth > 0.1 {
+        if state_changes.iter().any(|change| matches!(change, StateChange::Transfer(amount, _) if *amount > 0)) {
             bits |= 1 << 3;
+        }
+        if state_changes.iter().any(|change| matches!(change, StateChange::StorageWrite(_, _))) {
+            bits |= 1 << 4;
+        }
+        if path.conditions.iter().any(|condition| matches!(condition, Condition::CallerEq(_) | Condition::CallerEqStorage(_))) {
+            bits |= 1 << 5;
+        }
+        if path.conditions.iter().any(|condition| matches!(condition, Condition::ValueGt(_) | Condition::ValueLt(_))) {
+            bits |= 1 << 6;
+        }
+        if path.state_changes.iter().any(|change| matches!(change, StateChange::Delegatecall(_) | StateChange::Call(_, _, _))) {
+            bits |= 1 << 7;
+        }
+        if path.basic_blocks.len() > 2 {
+            bits |= 1 << 8;
+        }
+
+        for slot in observed_slots.iter().take(8) {
+            let idx = 9 + (*slot as usize % 32);
+            bits |= 1u64 << idx;
+        }
+        for change in state_changes {
+            match change {
+                StateChange::StorageWrite(slot, _) => {
+                    let idx = 41 + (*slot as usize % 12);
+                    bits |= 1u64 << idx;
+                }
+                StateChange::Delegatecall(_) => bits |= 1u64 << 53,
+                StateChange::SelfDestruct(_) => bits |= 1u64 << 54,
+                StateChange::Call(_, _, _) => bits |= 1u64 << 55,
+                StateChange::Transfer(amount, _) if *amount > 0 => bits |= 1u64 << 56,
+                _ => {}
+            }
+        }
+        if return_data.len() > 66 {
+            bits |= 1u64 << 57;
         }
         bits
     }
