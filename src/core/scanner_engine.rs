@@ -82,6 +82,12 @@ struct SimulationOutcome {
     reverts: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ReplayCandidate {
+    selector: String,
+    score: u32,
+}
+
 impl SimulationOutcome {
     fn has_confirmed_execution(&self) -> bool {
         self.successes > 0
@@ -671,13 +677,33 @@ pub async fn scan_contract(
     }
     emit(step_event("proxy", "Proxy & admin slot analysis", "done"));
 
+    let replay_candidates = prioritized_selectors_for_replay(
+        &analysis,
+        &selectors,
+        &dangerous_matches,
+        &proxy,
+        request.mode,
+    );
+    let prioritized_selectors = replay_candidates
+        .iter()
+        .map(|candidate| candidate.selector.clone())
+        .collect::<Vec<_>>();
+    if !replay_candidates.is_empty() {
+        let summary = replay_candidates
+            .iter()
+            .map(|candidate| format!("{}({})", candidate.selector, candidate.score))
+            .collect::<Vec<_>>()
+            .join(", ");
+        emit(log_event(
+            format!("Prioritized replay selectors: {summary}"),
+            "info",
+        ));
+    }
+
     let mut simulation = SimulationOutcome::default();
     if request.simulation {
         emit(step_event("simulation", "eth_call simulation", "running"));
-        let selectors_to_simulate = match request.mode {
-            ScanMode::Fast => selectors.iter().take(2).cloned().collect::<Vec<_>>(),
-            ScanMode::Deep => selectors.iter().take(5).cloned().collect::<Vec<_>>(),
-        };
+        let selectors_to_simulate = prioritized_selectors.clone();
 
         if selectors_to_simulate.is_empty() {
             emit(log_event("No selectors available for eth_call simulation".to_string(), "info"));
@@ -750,12 +776,17 @@ pub async fn scan_contract(
     emit(step_event("fork", "Anvil fork execution", "running"));
     
     // 🔥 PRIMEIRO: Roda advanced_rpc_analysis para detectar onlyOwner
-    match advanced_rpc_analysis(&rpc, &request.contract_address, &analysis, &selectors).await {
+    match advanced_rpc_analysis(&rpc, &request.contract_address, &analysis, &prioritized_selectors).await {
         Ok((rpc_found_exploit, rpc_state_delta)) => {
             if rpc_found_exploit {
                 // Só é potencialmente vulnerável - testa no fork
                 match forensics
-                    .validate_with_fork(&request.contract_address, &analysis, "0x0000000000000000000000000000000000000000")
+                    .validate_with_fork(
+                        &request.contract_address,
+                        &analysis,
+                        &prioritized_selectors,
+                        "0x0000000000000000000000000000000000000000",
+                    )
                     .await
                 {
                     Ok(Some(result)) => {
@@ -809,7 +840,12 @@ pub async fn scan_contract(
             ));
             // Fallback: tenta fork direto
             match forensics
-                .validate_with_fork(&request.contract_address, &analysis, "0x0000000000000000000000000000000000000000")
+                .validate_with_fork(
+                    &request.contract_address,
+                    &analysis,
+                    &prioritized_selectors,
+                    "0x0000000000000000000000000000000000000000",
+                )
                 .await
             {
                 Ok(Some(result)) => {
@@ -1033,7 +1069,7 @@ pub async fn scan_contract(
                 "NOT_USED".to_string()
             },
             confirmed: fork_validated,
-            selectors_tested: selectors.len(),
+            selectors_tested: prioritized_selectors.len(),
             reason: fork_reason,
             state_change_summary: state_delta.clone(),
         },
@@ -1150,6 +1186,134 @@ fn collect_selectors(analysis: &BytecodeAnalysis) -> Vec<String> {
         .iter()
         .map(BytecodeScanner::selector_to_hex)
         .collect()
+}
+
+fn prioritized_selectors_for_replay(
+    analysis: &BytecodeAnalysis,
+    selectors: &[String],
+    dangerous_matches: &[String],
+    proxy: &ProxyMetadata,
+    mode: ScanMode,
+) -> Vec<ReplayCandidate> {
+    let dangerous_labels = dangerous_matches
+        .iter()
+        .map(|entry| entry.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    let mut ranked = selectors
+        .iter()
+        .map(|selector| ReplayCandidate {
+            selector: selector.clone(),
+            score: score_selector_for_replay(
+                analysis,
+                selector,
+                &dangerous_labels,
+                proxy,
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.selector.cmp(&right.selector))
+    });
+
+    let limit = match mode {
+        ScanMode::Fast => 3,
+        ScanMode::Deep => 8,
+    };
+    ranked.truncate(limit.min(ranked.len()));
+    ranked
+}
+
+fn score_selector_for_replay(
+    analysis: &BytecodeAnalysis,
+    selector_hex: &str,
+    dangerous_labels: &[String],
+    proxy: &ProxyMetadata,
+) -> u32 {
+    let Some(selector_bytes) = parse_selector_hex(selector_hex) else {
+        return 0;
+    };
+    let selector_fragment = selector_hex
+        .strip_prefix("0x")
+        .unwrap_or(selector_hex)
+        .to_ascii_lowercase();
+
+    let mut score = 10;
+    if let Some(function) = analysis.get_function_by_selector(&selector_bytes) {
+        if function.is_dangerous {
+            score += 35;
+        }
+        if !function.has_access_control {
+            score += 12;
+        }
+
+        let block_score = analysis
+            .basic_blocks
+            .iter()
+            .find(|block| function.offset >= block.start && function.offset <= block.end)
+            .map(score_basic_block_for_replay)
+            .unwrap_or(0);
+        score += block_score;
+    }
+
+    if dangerous_labels
+        .iter()
+        .any(|entry| entry.contains(&selector_fragment))
+    {
+        score += 30;
+    }
+    if analysis.has_delegatecall {
+        score += 10;
+    }
+    if analysis.has_reentrancy_risk {
+        score += 8;
+    }
+    if analysis.has_upgrade_surface && proxy.is_proxy() {
+        score += 10;
+    }
+    if analysis.has_admin_surface {
+        score += 6;
+    }
+
+    score
+}
+
+fn score_basic_block_for_replay(block: &crate::bytecode::BasicBlockInfo) -> u32 {
+    let mut score = (block.successors.len() as u32) * 4;
+    if block.instructions.iter().any(|inst| inst.mnemonic == "SSTORE") {
+        score += 10;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "CALL") {
+        score += 8;
+    }
+    if block
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst.mnemonic, "DELEGATECALL" | "CALLCODE"))
+    {
+        score += 12;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "SELFDESTRUCT") {
+        score += 20;
+    }
+    if block.instructions.iter().any(|inst| inst.mnemonic == "JUMPI") {
+        score += 6;
+    }
+    score
+}
+
+fn parse_selector_hex(selector_hex: &str) -> Option<[u8; 4]> {
+    let raw = selector_hex.strip_prefix("0x").unwrap_or(selector_hex);
+    if raw.len() != 8 {
+        return None;
+    }
+    let decoded = hex::decode(raw).ok()?;
+    let bytes: [u8; 4] = decoded.try_into().ok()?;
+    Some(bytes)
 }
 
 fn opcode_capability_summary(analysis: &BytecodeAnalysis) -> String {
