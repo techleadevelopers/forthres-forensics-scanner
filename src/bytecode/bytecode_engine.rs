@@ -201,6 +201,11 @@ pub struct BytecodeAnalysis {
     pub bytecode: Vec<u8>,  // Agora obrigatório
     pub jumpdests: HashSet<usize>,
     pub basic_blocks: Vec<BasicBlockInfo>,
+    pub has_fallback: bool,
+    pub has_receive: bool,
+    pub dispatcher_targets: usize,
+    pub has_upgrade_surface: bool,
+    pub has_admin_surface: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -332,9 +337,8 @@ impl BytecodeScanner {
     /// Extract selectors from jump table patterns
     fn extract_from_jump_table(bytecode: &[u8], pc: usize) -> Option<Vec<[u8; 4]>> {
         let mut selectors = Vec::new();
-        
-        // Look for PUSH4 before JUMP or JUMPI
-        let mut offset = pc.saturating_sub(10);
+        let search_window = 96;
+        let mut offset = pc.saturating_sub(search_window);
         let start = offset;
         
         while offset < pc && offset < bytecode.len() {
@@ -345,10 +349,15 @@ impl BytecodeScanner {
                     bytecode[offset + 3],
                     bytecode[offset + 4],
                 ];
-                selectors.push(selector);
+                if selector != [0u8; 4]
+                    && selector != [0xFF; 4]
+                    && !selectors.contains(&selector)
+                {
+                    selectors.push(selector);
+                }
             }
             offset += 1;
-            if offset > start + 50 {
+            if offset > start + search_window {
                 break; // Limit search
             }
         }
@@ -371,7 +380,6 @@ impl BytecodeScanner {
         let mut risk_score: u32 = 0;
         let mut access_controls = Vec::new();
         let mut jumpdests = HashSet::new();
-        let mut storage_refs = Vec::new();
 
         let len = bytecode.len();
         let mut i = 0;
@@ -386,7 +394,6 @@ impl BytecodeScanner {
         // Second pass: analyze opcodes
         while i < len {
             let opcode = bytecode[i];
-            let mnemonic = Self::opcode_to_mnemonic(opcode);
 
             match opcode {
                 OPCODE_SELFDESTRUCT => {
@@ -410,6 +417,17 @@ impl BytecodeScanner {
                         description: "DELEGATECALL executes code in caller's context".to_string(),
                         context: None,
                     });
+                    if Self::has_sstore_before(bytecode, i) {
+                        has_reentrancy_risk = true;
+                        risk_score += 15;
+                        flags.push(BytecodeFlag {
+                            opcode,
+                            offset: i,
+                            severity: PatternSeverity::Medium,
+                            description: "Potential reentrancy: external call after storage write".to_string(),
+                            context: None,
+                        });
+                    }
                 }
                 OPCODE_CALLCODE => {
                     has_callcode = true;
@@ -421,6 +439,17 @@ impl BytecodeScanner {
                         description: "CALLCODE (deprecated) similar to delegatecall".to_string(),
                         context: None,
                     });
+                    if Self::has_sstore_before(bytecode, i) {
+                        has_reentrancy_risk = true;
+                        risk_score += 15;
+                        flags.push(BytecodeFlag {
+                            opcode,
+                            offset: i,
+                            severity: PatternSeverity::Medium,
+                            description: "Potential reentrancy: external call after storage write".to_string(),
+                            context: None,
+                        });
+                    }
                 }
                 OPCODE_CREATE2 => {
                     has_create2 = true;
@@ -442,31 +471,6 @@ impl BytecodeScanner {
                         description: "CALL to external contract".to_string(),
                         context: None,
                     });
-                }
-                OPCODE_SSTORE => {
-                    risk_score += 8;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::Medium,
-                        description: "SSTORE writes to storage".to_string(),
-                        context: None,
-                    });
-                    storage_refs.push(i);
-                }
-                OPCODE_SLOAD => {
-                    risk_score += 3;
-                }
-                // Detect onlyOwner pattern
-                OPCODE_CALLER => {
-                    // Look for EQ and JUMPI pattern
-                    if let Some(owner_check) = Self::detect_only_owner_pattern(bytecode, i) {
-                        access_controls.push(owner_check);
-                        risk_score -= 10; // Good: has access control
-                    }
-                }
-                // Detect reentrancy risk (CALL after SSTORE)
-                OPCODE_CALL | OPCODE_DELEGATECALL | OPCODE_CALLCODE => {
                     if Self::has_sstore_before(bytecode, i) {
                         has_reentrancy_risk = true;
                         risk_score += 15;
@@ -477,6 +481,27 @@ impl BytecodeScanner {
                             description: "Potential reentrancy: external call after storage write".to_string(),
                             context: None,
                         });
+                    }
+                }
+                OPCODE_SSTORE => {
+                    risk_score += 8;
+                    flags.push(BytecodeFlag {
+                        opcode,
+                        offset: i,
+                        severity: PatternSeverity::Medium,
+                        description: "SSTORE writes to storage".to_string(),
+                        context: None,
+                    });
+                }
+                OPCODE_SLOAD => {
+                    risk_score += 3;
+                }
+                // Detect onlyOwner pattern
+                OPCODE_CALLER => {
+                    // Look for EQ and JUMPI pattern
+                    if let Some(owner_check) = Self::detect_only_owner_pattern(bytecode, i) {
+                        access_controls.push(owner_check);
+                        risk_score -= 10; // Good: has access control
                     }
                 }
                 _ => {}
@@ -509,6 +534,21 @@ impl BytecodeScanner {
 
         // Build basic blocks
         let basic_blocks = Self::build_basic_blocks(bytecode, &jumpdests);
+        let has_fallback = Self::detect_fallback_entry(bytecode, &selectors, &basic_blocks);
+        let has_receive = Self::detect_receive_entry(bytecode, &selectors, &basic_blocks);
+        let dispatcher_targets = basic_blocks
+            .iter()
+            .filter(|block| {
+                block.instructions.iter().any(|inst| {
+                    matches!(inst.mnemonic, "CALLDATALOAD" | "CALLDATASIZE" | "JUMPI")
+                })
+            })
+            .count();
+        let has_upgrade_surface = has_delegatecall
+            || has_create2
+            || Self::has_upgrade_selectors(&selectors);
+        let has_admin_surface = !access_controls.is_empty()
+            || Self::has_admin_selectors(&selectors);
 
         BytecodeAnalysis {
             function_selectors: selectors,
@@ -525,6 +565,11 @@ impl BytecodeScanner {
             bytecode: bytecode.to_vec(),
             jumpdests,
             basic_blocks,
+            has_fallback,
+            has_receive,
+            dispatcher_targets,
+            has_upgrade_surface,
+            has_admin_surface,
         }
     }
 
@@ -692,66 +737,241 @@ impl BytecodeScanner {
         false
     }
 
+    fn has_upgrade_selectors(selectors: &[[u8; 4]]) -> bool {
+        let upgrade_signatures = [
+            "upgradeTo(address)",
+            "upgradeToAndCall(address,bytes)",
+            "setImplementation(address)",
+            "upgradeImplementation(address)",
+            "setBeacon(address)",
+            "changeImplementation(address)",
+        ];
+
+        upgrade_signatures
+            .iter()
+            .map(|sig| Self::selector_from_sig(sig))
+            .any(|selector| selectors.contains(&selector))
+    }
+
+    fn has_admin_selectors(selectors: &[[u8; 4]]) -> bool {
+        let admin_signatures = [
+            "transferOwnership(address)",
+            "renounceOwnership()",
+            "takeOwnership()",
+            "owner()",
+            "admin()",
+            "changeAdmin(address)",
+            "becomeAdmin()",
+            "setOwner(address)",
+            "grantRole(bytes32,address)",
+            "revokeRole(bytes32,address)",
+            "pause()",
+            "unpause()",
+        ];
+
+        admin_signatures
+            .iter()
+            .map(|sig| Self::selector_from_sig(sig))
+            .any(|selector| selectors.contains(&selector))
+    }
+
+    fn detect_fallback_entry(
+        bytecode: &[u8],
+        selectors: &[[u8; 4]],
+        basic_blocks: &[BasicBlockInfo],
+    ) -> bool {
+        if selectors.is_empty() {
+            return false;
+        }
+
+        let dispatcher_gate = basic_blocks.iter().any(|block| {
+            block.instructions
+                .iter()
+                .any(|inst| matches!(inst.mnemonic, "CALLDATASIZE" | "CALLDATALOAD"))
+                && block
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst.mnemonic, "JUMPI" | "REVERT"))
+        });
+        let zero_selector_check = bytecode
+            .windows(4)
+            .any(|window| window == [0x00, 0x00, 0x00, 0x00]);
+
+        dispatcher_gate || zero_selector_check
+    }
+
+    fn detect_receive_entry(
+        _bytecode: &[u8],
+        selectors: &[[u8; 4]],
+        basic_blocks: &[BasicBlockInfo],
+    ) -> bool {
+        if selectors.is_empty() {
+            return false;
+        }
+
+        basic_blocks.iter().take(4).any(|block| {
+            let has_callvalue = block
+                .instructions
+                .iter()
+                .any(|inst| inst.mnemonic == "CALLVALUE");
+            let has_revert_or_return = block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst.mnemonic, "JUMPI" | "RETURN" | "STOP" | "REVERT"));
+            has_callvalue && has_revert_or_return
+        })
+    }
+
     /// Build basic blocks from bytecode and jumpdests
     fn build_basic_blocks(bytecode: &[u8], jumpdests: &HashSet<usize>) -> Vec<BasicBlockInfo> {
-        let mut blocks = Vec::new();
-        let mut current_block_start = 0;
         let len = bytecode.len();
-        let mut i = 0;
-        
-        while i < len {
-            let opcode = bytecode[i];
-            let is_jump = opcode == OPCODE_JUMP || opcode == OPCODE_JUMPI;
-            let is_terminal = opcode == OPCODE_STOP || opcode == OPCODE_RETURN || 
-                             opcode == OPCODE_REVERT || opcode == OPCODE_SELFDESTRUCT;
-            
-            // Get push data if any
-            let push_data = if (0x60..=0x7F).contains(&opcode) {
-                let push_len = (opcode - 0x5F) as usize;
-                if i + 1 + push_len <= len {
-                    Some(bytecode[i + 1..i + 1 + push_len].to_vec())
+        if len == 0 {
+            return Vec::new();
+        }
+
+        let mut leaders: HashSet<usize> = HashSet::new();
+        leaders.insert(0);
+        for jumpdest in jumpdests {
+            leaders.insert(*jumpdest);
+        }
+
+        let mut cursor = 0;
+        while cursor < len {
+            let opcode = bytecode[cursor];
+            let next_pc = Self::next_pc(bytecode, cursor);
+            let is_terminal = matches!(
+                opcode,
+                OPCODE_JUMP | OPCODE_JUMPI | OPCODE_STOP | OPCODE_RETURN | OPCODE_REVERT | OPCODE_SELFDESTRUCT
+            );
+
+            if is_terminal && next_pc < len {
+                leaders.insert(next_pc);
+            }
+
+            cursor = next_pc.max(cursor + 1);
+        }
+
+        let mut leader_list: Vec<usize> = leaders.into_iter().filter(|pc| *pc < len).collect();
+        leader_list.sort_unstable();
+
+        let mut blocks = Vec::new();
+        for (idx, start) in leader_list.iter().enumerate() {
+            let end = if let Some(next_start) = leader_list.get(idx + 1) {
+                next_start.saturating_sub(1)
+            } else {
+                len - 1
+            };
+
+            let mut instructions = Vec::new();
+            let mut pc = *start;
+            while pc <= end && pc < len {
+                let opcode = bytecode[pc];
+                let push_data = if (0x60..=0x7F).contains(&opcode) {
+                    let push_len = (opcode - 0x5F) as usize;
+                    if pc + 1 + push_len <= len {
+                        Some(bytecode[pc + 1..pc + 1 + push_len].to_vec())
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
-            
-            // Block ends at jump or terminal
-            if is_jump || is_terminal {
-                let block = BasicBlockInfo {
-                    start: current_block_start,
-                    end: i,
-                    instructions: Vec::new(), // Would need to collect instructions
-                    successors: if is_jump && i + 1 < len && jumpdests.contains(&(i + 1)) {
-                        vec![i + 1]
-                    } else {
-                        Vec::new()
-                    },
                 };
-                blocks.push(block);
-                current_block_start = i + 1;
+
+                instructions.push(Instruction {
+                    opcode,
+                    pc,
+                    push_data,
+                    mnemonic: Self::opcode_to_mnemonic(opcode),
+                });
+
+                let next_pc = Self::next_pc(bytecode, pc);
+                if next_pc <= pc {
+                    break;
+                }
+                pc = next_pc;
             }
-            
-            // Skip push data
-            if (0x60..=0x7F).contains(&opcode) {
-                let push_len = (opcode - 0x5F) as usize;
-                i += push_len;
-            }
-            i += 1;
-        }
-        
-        // Add final block
-        if current_block_start < len {
+
             blocks.push(BasicBlockInfo {
-                start: current_block_start,
-                end: len - 1,
-                instructions: Vec::new(),
+                start: *start,
+                end,
+                instructions,
                 successors: Vec::new(),
             });
         }
-        
+
+        let leader_index: HashMap<usize, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(idx, block)| (block.start, idx))
+            .collect();
+
+        for idx in 0..blocks.len() {
+            let mut successors = Vec::new();
+            let last_instruction = blocks[idx].instructions.last().cloned();
+            let block_end = blocks[idx].end;
+
+            if let Some(inst) = last_instruction {
+                match inst.opcode {
+                    OPCODE_JUMP => {
+                        if let Some(dest) = Self::extract_jump_target(&blocks[idx].instructions) {
+                            if leader_index.contains_key(&dest) {
+                                successors.push(dest);
+                            }
+                        }
+                    }
+                    OPCODE_JUMPI => {
+                        if let Some(dest) = Self::extract_jump_target(&blocks[idx].instructions) {
+                            if leader_index.contains_key(&dest) {
+                                successors.push(dest);
+                            }
+                        }
+                        let fallthrough = block_end.saturating_add(1);
+                        if leader_index.contains_key(&fallthrough) {
+                            successors.push(fallthrough);
+                        }
+                    }
+                    OPCODE_STOP | OPCODE_RETURN | OPCODE_REVERT | OPCODE_SELFDESTRUCT => {}
+                    _ => {
+                        let fallthrough = block_end.saturating_add(1);
+                        if leader_index.contains_key(&fallthrough) {
+                            successors.push(fallthrough);
+                        }
+                    }
+                }
+            }
+
+            successors.sort_unstable();
+            successors.dedup();
+            blocks[idx].successors = successors;
+        }
+
         blocks
+    }
+
+    fn next_pc(bytecode: &[u8], pc: usize) -> usize {
+        let opcode = bytecode[pc];
+        if (0x60..=0x7F).contains(&opcode) {
+            let push_len = (opcode - 0x5F) as usize;
+            (pc + 1 + push_len).min(bytecode.len())
+        } else {
+            (pc + 1).min(bytecode.len())
+        }
+    }
+
+    fn extract_jump_target(instructions: &[Instruction]) -> Option<usize> {
+        instructions.iter().rev().skip(1).find_map(|inst| {
+            inst.push_data.as_ref().and_then(|data| {
+                if data.is_empty() || data.len() > 8 {
+                    return None;
+                }
+
+                let mut target = 0usize;
+                for byte in data {
+                    target = (target << 8) | (*byte as usize);
+                }
+                Some(target)
+            })
+        })
     }
 
     /// Match dangerous signatures against selectors
