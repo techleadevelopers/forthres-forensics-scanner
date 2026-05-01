@@ -14,8 +14,8 @@ enum OutputFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "hexora-verify")]
-#[command(about = "Hexora verify engine built on top of the existing scan report", long_about = None)]
+#[command(name = "forthres-verify")]
+#[command(about = "forthres verify engine built on top of the existing scan report", long_about = None)]
 struct Cli {
     #[arg(long)]
     report_file: Option<PathBuf>,
@@ -59,7 +59,7 @@ fn read_report_json(report_file: &Option<PathBuf>) -> Result<String> {
 }
 
 fn print_pretty(result: &ghost_scanner::verify_engine::VerifyDecision) {
-    println!("Hexora Verify Engine");
+    println!("forthres Verify Engine");
     println!("Contract: {}", result.report.contract_address);
     println!("Chain: {}", result.report.chain);
     println!("Passed: {}", if result.passed { "true" } else { "false" });
