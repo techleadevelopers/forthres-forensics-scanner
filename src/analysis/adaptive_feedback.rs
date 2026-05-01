@@ -386,13 +386,25 @@ impl forthresGuidedFuzzer {
     }
     
     /// Muta com base no feedback de cobertura
-    pub fn mutate_guided(&mut self, input: &TestInput, feedback: &SimulationResult) -> Vec<TestInput> {
+    fn mutate_guided(
+        &mut self,
+        input: &TestInput,
+        feedback: &SimulationResult,
+        profile: PathPriorityProfile,
+    ) -> Vec<TestInput> {
         let mut mutations = Vec::new();
+        let energy_boost = if profile.score >= 0.8 {
+            2
+        } else if profile.score >= 0.5 {
+            1
+        } else {
+            0
+        };
         
         match &feedback.coverage_new {
             CoverageDelta::NewBasicBlock(pc) => {
                 // Ganhou nova cobertura: energia alta
-                let energy = self.energy_schedule.high;
+                let energy = self.energy_schedule.high + (energy_boost * 25);
                 tracing::debug!("🎯 New basic block at PC=0x{:x}, using high energy", pc);
                 
                 for strategy in &self.mutation_strategies {
@@ -406,7 +418,7 @@ impl forthresGuidedFuzzer {
             }
             CoverageDelta::NewEdge(edge) => {
                 // Nova edge: energia média
-                let energy = self.energy_schedule.medium;
+                let energy = self.energy_schedule.medium + (energy_boost * 15);
                 tracing::debug!("🎯 New edge {}, using medium energy", edge);
                 
                 for strategy in &self.mutation_strategies {
@@ -415,7 +427,7 @@ impl forthresGuidedFuzzer {
             }
             CoverageDelta::Multiple(pcs) => {
                 // Múltiplas novas coberturas: energia alta
-                let energy = self.energy_schedule.high;
+                let energy = self.energy_schedule.high + (energy_boost * 25);
                 tracing::debug!("🎯 Multiple new coverage: {} blocks", pcs.len());
                 
                 for strategy in &self.mutation_strategies {
@@ -424,7 +436,7 @@ impl forthresGuidedFuzzer {
             }
             CoverageDelta::NoNew => {
                 // Sem progresso: tenta estratégias agressivas
-                let energy = self.energy_schedule.aggressive;
+                let energy = self.energy_schedule.aggressive + (energy_boost * 30);
                 tracing::debug!("🎯 No new coverage, using aggressive energy");
                 
                 // Apenas estratégias mais agressivas
@@ -437,6 +449,20 @@ impl forthresGuidedFuzzer {
         if input.value == 0 {
             mutations.push(input.with_max_value());
             mutations.push(input.with_specific_value(1));
+        }
+        if profile.prefers_value {
+            mutations.push(input.with_specific_value(1_000_000_000_000_000_000));
+            mutations.push(input.with_max_value());
+        }
+        if profile.prefers_caller_variants {
+            mutations.push(input.with_random_caller(fastrand::u64(..)));
+            mutations.push(input.with_specific_caller("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
+        }
+        if profile.prefers_calldata_growth {
+            mutations.push(input.with_random_calldata(32));
+            if profile.branch_pressure > 2 {
+                mutations.push(input.with_random_calldata(64));
+            }
         }
         
         mutations.truncate(50);
@@ -534,6 +560,15 @@ pub struct FeedbackLoopEngine {
     fuzzer: forthresGuidedFuzzer,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PathPriorityProfile {
+    score: f32,
+    branch_pressure: u32,
+    prefers_value: bool,
+    prefers_caller_variants: bool,
+    prefers_calldata_growth: bool,
+}
+
 impl FeedbackLoopEngine {
     pub fn new(forensics: ForensicsEngine, max_iterations: u32, mutation_factor: f32) -> Self {
         Self {
@@ -573,6 +608,7 @@ impl FeedbackLoopEngine {
         
         // Step 3: Iterate over each path
         for path_value in paths_with_value {
+            let profile = self.build_path_profile(&path_value);
             if path_value.economic_value_eth < 0.001 {
                 tracing::info!("⏭️ Skipping low-value path: {:.4} ETH", path_value.economic_value_eth);
                 continue;
@@ -588,7 +624,11 @@ impl FeedbackLoopEngine {
             tracing::info!("📋 Extracted {} constraints", constraints.len());
             
             // Solve constraints → generate initial candidates
-            let mut candidates = self.solve_constraints(&constraints);
+            let mut candidates = self.solve_constraints(
+                &constraints,
+                &path_value.path.entry_selector,
+                profile,
+            );
             tracing::info!("🎲 Generated {} candidate inputs", candidates.len());
             
             // FEEDBACK LOOP for each candidate
@@ -602,7 +642,9 @@ impl FeedbackLoopEngine {
                     let start_time = Instant::now();
                     
                     // Simulate
-                    let mut result = self.simulate_input(candidate, contract_address, &path_value).await?;
+                    let mut result = self
+                        .simulate_input(candidate, contract_address, &path_value, profile)
+                        .await?;
                     let execution_time_ms = start_time.elapsed().as_millis() as u64;
                     result.execution_time_ms = execution_time_ms;
                     
@@ -672,7 +714,7 @@ impl FeedbackLoopEngine {
                     }
                     
                     // GUIDED MUTATION: generate new inputs based on result
-                    let mutations = self.fuzzer.mutate_guided(candidate, &result);
+                    let mutations = self.fuzzer.mutate_guided(candidate, &result, profile);
                     if let Some(mutated) = mutations.first() {
                         *candidate = mutated.clone();
                     }
@@ -725,8 +767,15 @@ impl FeedbackLoopEngine {
     }
     
     /// Solve constraints → generate test inputs
-    fn solve_constraints(&self, constraints: &[Condition]) -> Vec<TestInput> {
-        let mut inputs = vec![TestInput::default()];
+    fn solve_constraints(
+        &self,
+        constraints: &[Condition],
+        selector: &str,
+        profile: PathPriorityProfile,
+    ) -> Vec<TestInput> {
+        let mut base = TestInput::default();
+        base.selector = normalize_selector_hex(selector);
+        let mut inputs = vec![base];
         
         for constraint in constraints {
             let mut new_inputs = Vec::new();
@@ -780,12 +829,51 @@ impl FeedbackLoopEngine {
             inputs = new_inputs;
         }
         
+        if profile.prefers_value {
+            inputs.push(
+                TestInput {
+                    selector: normalize_selector_hex(selector),
+                    ..TestInput::default()
+                }
+                .with_specific_value(1_000_000_000_000_000_000),
+            );
+        }
+        if profile.prefers_caller_variants {
+            inputs.push(
+                TestInput {
+                    selector: normalize_selector_hex(selector),
+                    ..TestInput::default()
+                }
+                .with_random_caller(fastrand::u64(..)),
+            );
+        }
+        if profile.prefers_calldata_growth {
+            inputs.push(
+                TestInput {
+                    selector: normalize_selector_hex(selector),
+                    ..TestInput::default()
+                }
+                .with_random_calldata(32),
+            );
+        }
+
+        inputs.sort_by(|left, right| {
+            candidate_seed_score(right, profile)
+                .partial_cmp(&candidate_seed_score(left, profile))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         inputs.truncate(20);
         inputs
     }
     
     /// Simulate input via eth_call or fork
-    async fn simulate_input(&self, input: &TestInput, contract_address: &str, path_value: &ExploitPathWithValue) -> Result<SimulationResult> {
+    async fn simulate_input(
+        &self,
+        input: &TestInput,
+        contract_address: &str,
+        path_value: &ExploitPathWithValue,
+        profile: PathPriorityProfile,
+    ) -> Result<SimulationResult> {
         let start = std::time::Instant::now();
         
         let mut full_calldata = hex::decode(&input.selector.trim_start_matches("0x"))
@@ -793,18 +881,29 @@ impl FeedbackLoopEngine {
         full_calldata.extend(&input.calldata);
         
         let calldata_hex = format!("0x{}", hex::encode(&full_calldata));
+        let effective_caller = self.resolve_simulation_caller(input, profile);
+        let gas_budget = self.estimate_simulation_gas(&full_calldata, profile);
+        let observed_slots = self.observed_storage_slots(&path_value.path, profile);
+        let balance_hex = format!("0x{:x}", self.simulation_balance(profile));
         
         // Capture storage before
-        let storage_before = self.capture_storage_state(contract_address).await;
+        let _ = self.forensics.set_balance(&effective_caller, &balance_hex).await;
+        let _ = self.forensics.impersonate(&effective_caller).await;
+        let storage_before = self
+            .capture_storage_state(contract_address, &observed_slots)
+            .await;
         
-        match self.forensics.eth_call(
-            &input.caller,
+        match self.forensics.eth_call_with_gas(
+            &effective_caller,
             contract_address,
             &calldata_hex,
             &format!("0x{:x}", input.value),
+            gas_budget,
         ).await {
             Ok(result) => {
-                let storage_after = self.capture_storage_state(contract_address).await;
+                let storage_after = self
+                    .capture_storage_state(contract_address, &observed_slots)
+                    .await;
                 let state_changes = self.analyze_state_changes_detailed(&storage_before, &storage_after, input);
                 let ownership_changed = self.detect_ownership_change(&storage_before, &storage_after);
                 let delegatecall_detected = self.detect_delegatecall(&result);
@@ -819,7 +918,7 @@ impl FeedbackLoopEngine {
                     success: true,
                     state_changes,
                     revert_reason: None,
-                    gas_used: estimate_gas_from_calldata(&full_calldata),
+                    gas_used: gas_budget,
                     return_data: hex::decode(result.trim_start_matches("0x")).unwrap_or_default(),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                     coverage_new,
@@ -847,14 +946,17 @@ impl FeedbackLoopEngine {
         }
     }
     
-    async fn capture_storage_state(&self, contract_address: &str) -> HashMap<u64, String> {
+    async fn capture_storage_state(
+        &self,
+        contract_address: &str,
+        slots: &[u64],
+    ) -> HashMap<u64, String> {
         let mut storage = HashMap::new();
-        let critical_slots = [0u64, 1, 2, 3, 4, 5, 10, 11, 12, 100];
         
-        for slot in critical_slots {
+        for slot in slots {
             let slot_hex = format!("0x{:x}", slot);
             if let Ok(value) = self.forensics.get_storage(contract_address, &slot_hex).await {
-                storage.insert(slot, value);
+                storage.insert(*slot, value);
             }
         }
         
@@ -926,6 +1028,113 @@ impl FeedbackLoopEngine {
             bits |= 1 << 3;
         }
         bits
+    }
+
+    fn build_path_profile(&self, path_value: &ExploitPathWithValue) -> PathPriorityProfile {
+        let branch_pressure = path_value.path.basic_blocks.len().min(u32::MAX as usize) as u32;
+        let prefers_value = path_value.economic_value_eth > 0.1
+            || path_value
+                .path
+                .conditions
+                .iter()
+                .any(|condition| matches!(condition, Condition::ValueGt(_) | Condition::ValueLt(_)));
+        let prefers_caller_variants = path_value.path.conditions.iter().any(|condition| {
+            matches!(condition, Condition::CallerEq(_) | Condition::CallerEqStorage(_) | Condition::NotZeroAddress)
+        });
+        let prefers_calldata_growth = branch_pressure >= 2
+            || path_value.path.state_changes.iter().any(|change| {
+                matches!(change, StateChange::Call(_, _, _) | StateChange::Delegatecall(_))
+            });
+
+        let mut score = (path_value.risk_adjusted_value.min(5.0) / 5.0) as f32;
+        score += (path_value.path.conditions.len() as f32) * 0.05;
+        score += (path_value.path.state_changes.len() as f32) * 0.07;
+        if prefers_value {
+            score += 0.1;
+        }
+        if prefers_caller_variants {
+            score += 0.08;
+        }
+        if prefers_calldata_growth {
+            score += 0.08;
+        }
+
+        PathPriorityProfile {
+            score: score.clamp(0.0, 1.0),
+            branch_pressure,
+            prefers_value,
+            prefers_caller_variants,
+            prefers_calldata_growth,
+        }
+    }
+
+    fn resolve_simulation_caller(&self, input: &TestInput, profile: PathPriorityProfile) -> String {
+        if input.caller.starts_with("storage[") {
+            return "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+        }
+        if profile.prefers_caller_variants
+            && input.caller == "0x0000000000000000000000000000000000000000"
+        {
+            return input.with_random_caller(fastrand::u64(..)).caller;
+        }
+        input.caller.clone()
+    }
+
+    fn estimate_simulation_gas(&self, calldata: &[u8], profile: PathPriorityProfile) -> u64 {
+        let mut gas = estimate_gas_from_calldata(calldata);
+        gas += (profile.branch_pressure as u64) * 25_000;
+        if profile.prefers_calldata_growth {
+            gas += 150_000;
+        }
+        if profile.prefers_value {
+            gas += 200_000;
+        }
+        gas.clamp(120_000, 8_000_000)
+    }
+
+    fn simulation_balance(&self, profile: PathPriorityProfile) -> u128 {
+        if profile.prefers_value {
+            10_000_000_000_000_000_000u128
+        } else if profile.prefers_calldata_growth {
+            2_000_000_000_000_000_000u128
+        } else {
+            1_000_000_000_000_000_000u128
+        }
+    }
+
+    fn observed_storage_slots(
+        &self,
+        path: &ControlFlowPath,
+        profile: PathPriorityProfile,
+    ) -> Vec<u64> {
+        let mut slots = vec![0u64, 1, 2, 3, 4, 5, 10, 11, 12, 100];
+
+        for condition in &path.conditions {
+            if let Condition::CallerEqStorage(slot) = condition {
+                slots.push(*slot);
+            }
+            if let Condition::StorageSlotEq(slot, _) | Condition::StorageSlotNeq(slot, _) = condition
+            {
+                slots.push(*slot);
+            }
+        }
+
+        for change in &path.state_changes {
+            if let StateChange::StorageWrite(slot, _) = change {
+                slots.push(*slot);
+            }
+        }
+
+        if profile.prefers_calldata_growth || profile.branch_pressure > 2 {
+            slots.extend([101, 102, 255]);
+        }
+        if profile.prefers_value {
+            slots.extend([6, 7, 8, 9]);
+        }
+
+        slots.sort_unstable();
+        slots.dedup();
+        slots
     }
     
     /// SCORE GRANULAR com weighted components
@@ -1007,6 +1216,27 @@ fn estimate_gas_from_calldata(calldata: &[u8]) -> u64 {
         .map(|&b| if b == 0 { 4 } else { 16 })
         .sum();
     base_gas + calldata_gas
+}
+
+fn candidate_seed_score(input: &TestInput, profile: PathPriorityProfile) -> f32 {
+    let mut score = profile.score;
+    if profile.prefers_value && input.value > 0 {
+        score += 0.2;
+    }
+    if profile.prefers_caller_variants
+        && input.caller != "0x0000000000000000000000000000000000000000"
+    {
+        score += 0.15;
+    }
+    if profile.prefers_calldata_growth && !input.calldata.is_empty() {
+        score += (input.calldata.len().min(64) as f32) / 256.0;
+    }
+    score
+}
+
+fn normalize_selector_hex(selector: &str) -> String {
+    let raw = selector.strip_prefix("0x").unwrap_or(selector);
+    format!("0x{}", raw)
 }
 
 // ============================================================
