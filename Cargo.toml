@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "ghost-scanner"
+name = "forthres"
 path = "src/bin/hexora-scan.rs"
 
 [[bin]]
-name = "hexora-verify"
+name = "forthres-verify"
 path = "src/bin/hexora-verify.rs"
 
 [dependencies]
