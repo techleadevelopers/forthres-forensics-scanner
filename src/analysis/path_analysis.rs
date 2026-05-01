@@ -1,5 +1,5 @@
 // src/offensive/path_finder.rs
-//! Hexora Control Flow Graph Builder
+//! forthres Control Flow Graph Builder
 //!
 //! Constrói CFG a partir de bytecode EVM com:
 //! - Detecção real de padrões (CALLER + PUSH20 + EQ)
@@ -80,7 +80,7 @@ impl ControlFlowPath {
 }
 
 // ============================================================
-// NOVO: ANALISADOR DE PADRÕES HEXORA
+// NOVO: ANALISADOR DE PADRÕES forthres
 // ============================================================
 
 #[derive(Debug, Clone)]
