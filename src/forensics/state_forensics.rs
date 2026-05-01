@@ -299,6 +299,7 @@ impl ForensicsEngine {
         &self,
         contract_address: &str,
         analysis: &BytecodeAnalysis,
+        prioritized_selectors: &[String],
         _original_caller: &str,
     ) -> Result<Option<ForensicResult>> {
         let start = Instant::now();
@@ -335,6 +336,15 @@ impl ForensicsEngine {
         let mut confirmed_exploits = Vec::new();
         let mut mev_opportunities = Vec::new();
         let mut exploitation_probability = 0.0;
+        let selectors_under_test = if prioritized_selectors.is_empty() {
+            analysis
+                .function_selectors
+                .iter()
+                .map(|selector| format!("0x{}", hex::encode(selector)))
+                .collect::<Vec<_>>()
+        } else {
+            prioritized_selectors.to_vec()
+        };
         
         if self.config.enable_fuzzing {
             info!("🎯 Running offensive fuzzing analysis...");
@@ -389,8 +399,8 @@ impl ForensicsEngine {
         }
         
         // Verificação tradicional de selectors
-        for selector in &analysis.function_selectors {
-            let calldata = format!("0x{}", hex::encode(selector));
+        for selector in &selectors_under_test {
+            let calldata = selector.clone();
 
             match self
                 .eth_call_with_gas(attacker, contract_address, &calldata, "0x0", 5_000_000)
@@ -401,8 +411,8 @@ impl ForensicsEngine {
                         unauthorized_access = true;
                     }
                     delta_notes.push(format!(
-                        "Selector 0x{} returned {} from unauthorized caller",
-                        hex::encode(selector),
+                        "Selector {} returned {} from unauthorized caller",
+                        selector,
                         &output[..output.len().min(20)]
                     ));
                 }
