@@ -1,5 +1,5 @@
 // src/offensive/probability_engine.rs
-//! Hexora Bayesian Probability Engine
+//! forthres Bayesian Probability Engine
 //!
 //! Estima probabilidades de execução de paths usando:
 //! - Bayesian inference com aprendizado online
