@@ -5,7 +5,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release --bin ghost-scanner
+RUN cargo build --release --bin forthres
 
 FROM debian:bookworm-slim
 
@@ -16,7 +16,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/ghost-scanner /usr/local/bin/ghost-scanner
+COPY --from=builder /app/target/release/forthres /usr/local/bin/forthres
 
 RUN mkdir -p /app/reports \
     && chown -R scanner:scanner /app
@@ -29,4 +29,4 @@ ENV PORT=8081
 
 EXPOSE 8081
 
-CMD ["sh", "-lc", "exec /usr/local/bin/ghost-scanner serve --host 0.0.0.0 --port ${PORT:-8081}"]
+CMD ["sh", "-lc", "exec /usr/local/bin/forthres serve --host 0.0.0.0 --port ${PORT:-8081}"]
