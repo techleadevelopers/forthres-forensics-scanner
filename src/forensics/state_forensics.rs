@@ -12,7 +12,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn, error};
 
 use crate::bytecode::BytecodeAnalysis;
-use crate::offensive::feedback_loop::{FeedbackLoopEngine, ExploitAttempt, HexoraGuidedFuzzer};
+use crate::offensive::feedback_loop::{FeedbackLoopEngine, ExploitAttempt, forthresGuidedFuzzer};
 use crate::offensive::economic_impact::RealTimeEconomicEngine;
 use crate::offensive::mev_integration::{MevEngine, MevConfig, MevOpportunity};
 
