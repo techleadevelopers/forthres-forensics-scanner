@@ -1,5 +1,5 @@
 // src/offensive/economic_impact.rs
-//! Hexora Real-Time Economic Impact Engine
+//! forthres Real-Time Economic Impact Engine
 //!
 //! Calcula valor econômico de exploits usando:
 //! - Preços em tempo real via Chainlink/Uniswap
