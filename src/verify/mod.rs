@@ -112,7 +112,7 @@ pub fn verify_report(report: &VulnerabilityReport, requirements: &VerifyRequirem
         violations.push(VerifyViolation {
             rule: "noSelfDestruct".to_string(),
             severity: VerifyViolationSeverity::Critical,
-            message: "SELFDESTRUCT behavior was detected by the Hexora scan engine.".to_string(),
+            message: "SELFDESTRUCT behavior was detected by the forthres scan engine.".to_string(),
             evidence: vec![
                 format!("kind={}", report.kind),
                 format!("description={}", report.description),
