@@ -1,5 +1,5 @@
 // src/offensive/symbolic_executor.rs
-//! Hexora Symbolic Execution Engine
+//! forthres Symbolic Execution Engine
 //! 
 //! Executor simbólico para bytecode EVM com suporte a:
 //! - Path splitting em branches condicionais
@@ -38,7 +38,7 @@ pub struct PathCondition {
 }
 
 // ============================================================
-// NOVAS ESTRUTURAS HEXORA
+// NOVAS ESTRUTURAS forthres
 // ============================================================
 
 /// Estado completo de um path simbólico
@@ -97,15 +97,15 @@ impl Default for SymbolicConfig {
 }
 
 // ============================================================
-// HEXORA SYMBOLIC EXECUTOR
+// forthres SYMBOLIC EXECUTOR
 // ============================================================
 
-pub struct HexoraSymbolicExecutor {
+pub struct forthresSymbolicExecutor {
     config: SymbolicConfig,
     next_path_id: usize,
 }
 
-impl HexoraSymbolicExecutor {
+impl forthresSymbolicExecutor {
     pub fn new(config: SymbolicConfig) -> Self {
         Self {
             config,
@@ -651,7 +651,7 @@ enum SegmentResult {
 // ============================================================
 
 pub fn execute_symbolic(analysis: &BytecodeAnalysis, selector: &[u8; 4]) -> Vec<PathCondition> {
-    let mut executor = HexoraSymbolicExecutor::new(SymbolicConfig::default());
+    let mut executor = forthresSymbolicExecutor::new(SymbolicConfig::default());
     let result = executor.execute(analysis, selector);
     
     // Converte o primeiro path para o formato antigo
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn test_symbolic_executor_creation() {
         let config = SymbolicConfig::default();
-        let executor = HexoraSymbolicExecutor::new(config);
+        let executor = forthresSymbolicExecutor::new(config);
         assert_eq!(executor.next_path_id, 0);
     }
 }
