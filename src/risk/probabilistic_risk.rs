@@ -10,14 +10,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::f64::consts::PI;
-use std::sync::Arc;
 use rand::prelude::*;
 use rand_distr::{Normal, LogNormal, Distribution};
-use tracing::{debug, info, warn, error};
+use tracing::info;
 
 use crate::bytecode::{EIP7702Detection, EIP7702Pattern, PatternSeverity};
-use crate::path::{ExecutionPath, PathType, StateChange};
+use crate::path::{ExecutionPath, PathType};
 
 // ============================================================
 // CONSTANTS - BASEADO EM DADOS REAIS (2025-2026)
@@ -30,7 +28,7 @@ pub const REAL_EXPLOIT_STATS: RealExploitStatistics = RealExploitStatistics {
     malicious_delegation_percentage: 0.97,      // 97% são maliciosos
     average_loss_per_exploit_eth: 12.5,
     median_loss_per_exploit_eth: 2.3,
-    total_losses_estimated_eth: 450_000,
+    total_losses_estimated_eth: 450_000.0,
     exploit_success_rate_attempt: 0.43,
     time_to_exploit_avg_hours: 72.0,
     chains_affected: 8,
@@ -216,7 +214,7 @@ impl ProbabilisticRiskEngine {
                 .map(|(_, w)| *w)
                 .unwrap_or(0.5);
             
-            let confidence_weight = detection.confidence;
+            let confidence_weight = detection.confidence as f64;
             
             let weighted_prob = pattern_prob * severity_weight * confidence_weight;
             total_prob += weighted_prob;
@@ -492,7 +490,7 @@ impl ProbabilisticRiskEngine {
     
     /// Calcula fator de risco sistêmico (impacto em ecossistema)
     pub fn calculate_systemic_risk_factor(&self, detections: &[EIP7702Detection]) -> f64 {
-        let mut factor = 1.0;
+        let mut factor: f64 = 1.0;
         
         // Padrões que afetam múltiplos protocolos
         let has_chain_agnostic = detections.iter().any(|d|
@@ -604,7 +602,7 @@ impl ProbabilisticRiskEngine {
                 1.0
             };
             
-            let detection_confidence = pattern_confidence * evidence_factor * detection.confidence;
+            let detection_confidence = pattern_confidence * evidence_factor * detection.confidence as f64;
             
             let weight = match detection.severity {
                 PatternSeverity::Critical => 1.0,
