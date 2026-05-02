@@ -15,6 +15,10 @@ path = "src/bin/hexora-scan.rs"
 name = "forthres-verify"
 path = "src/bin/hexora-verify.rs"
 
+[[bin]]
+name = "forthres-web-audit"
+path = "src/bin/forthres-web-audit.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
@@ -57,6 +61,7 @@ async-trait = "0.1"
 
 # URL parsing
 url = "2"
+regex = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
