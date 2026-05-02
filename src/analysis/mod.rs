@@ -808,7 +808,7 @@ fn basic_block_priority_score(block: &crate::bytecode::BasicBlockInfo) -> u32 {
     if block
         .instructions
         .iter()
-        .any(|inst| matches!(inst.mnemonic, "DELEGATECALL" | "CALLCODE"))
+        .any(|inst| inst.mnemonic == "DELEGATECALL" || inst.mnemonic == "CALLCODE")
     {
         score += 12;
     }
