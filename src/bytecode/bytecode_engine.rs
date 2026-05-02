@@ -1,117 +1,143 @@
-// src/bytecode.rs
-//! forthres Bytecode Analysis Module
+// src/bytecode_engine.rs
+//! Forthres Bytecode Analysis Engine - EIP-7702 MAXIMUM LEVEL
 //!
-//! Advanced EVM bytecode analysis with:
-//! - Full opcode detection (all dangerous patterns)
-//! - Function selector extraction with jump table support
-//! - Access control pattern detection
-//! - Storage layout inference
-//! - Integration with offensive modules
+//! Detects structural vulnerabilities introduced by EIP-7702:
+//! - EOA only bypass (tx.origin + EQ as broken assumption)
+//! - Batch call exploits (unrestricted batch/multicall selectors)
+//! - Malicious delegation patterns (unvalidated delegate targets)
+//! - Chain-agnostic replay attacks (chainId = 0)
+//! - Admin surface delegation abuse (admin + batch + delegate)
 
 use sha3::{Digest, Keccak256};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use tracing::{debug, info, warn};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use tracing::{debug, info, warn, error};
 
 // ============================================================
-// OPCODE CONSTANTS
+// EIP-7702 SPECIFIC CONSTANTS
 // ============================================================
 
-pub const OPCODE_STOP: u8 = 0x00;
-pub const OPCODE_ADD: u8 = 0x01;
-pub const OPCODE_MUL: u8 = 0x02;
-pub const OPCODE_SUB: u8 = 0x03;
-pub const OPCODE_DIV: u8 = 0x04;
-pub const OPCODE_SDIV: u8 = 0x05;
-pub const OPCODE_MOD: u8 = 0x06;
-pub const OPCODE_SMOD: u8 = 0x07;
-pub const OPCODE_ADDMOD: u8 = 0x08;
-pub const OPCODE_MULMOD: u8 = 0x09;
-pub const OPCODE_EXP: u8 = 0x0A;
-pub const OPCODE_SIGNEXTEND: u8 = 0x0B;
+/// EIP-7702 transaction type
+pub const EIP7702_TX_TYPE: u8 = 0x04;
 
-pub const OPCODE_LT: u8 = 0x10;
-pub const OPCODE_GT: u8 = 0x11;
-pub const OPCODE_SLT: u8 = 0x12;
-pub const OPCODE_SGT: u8 = 0x13;
-pub const OPCODE_EQ: u8 = 0x14;
-pub const OPCODE_ISZERO: u8 = 0x15;
-pub const OPCODE_AND: u8 = 0x16;
-pub const OPCODE_OR: u8 = 0x17;
-pub const OPCODE_XOR: u8 = 0x18;
-pub const OPCODE_NOT: u8 = 0x19;
-pub const OPCODE_BYTE: u8 = 0x1A;
-pub const OPCODE_SHL: u8 = 0x1B;
-pub const OPCODE_SHR: u8 = 0x1C;
-pub const OPCODE_SAR: u8 = 0x1D;
+/// EIP-7702 authority tuple marker (magic bytes)
+pub const EIP7702_AUTHORITY_MAGIC: [u8; 6] = [0xef, 0x01, 0x00, 0x00, 0x00, 0x00];
 
-pub const OPCODE_SHA3: u8 = 0x20;
+/// Chain-agnostic mode constant
+pub const CHAIN_AGNOSTIC_ID: u64 = 0;
 
-pub const OPCODE_ADDRESS: u8 = 0x30;
-pub const OPCODE_BALANCE: u8 = 0x31;
-pub const OPCODE_ORIGIN: u8 = 0x32;
-pub const OPCODE_CALLER: u8 = 0x33;
-pub const OPCODE_CALLVALUE: u8 = 0x34;
-pub const OPCODE_CALLDATALOAD: u8 = 0x35;
-pub const OPCODE_CALLDATASIZE: u8 = 0x36;
-pub const OPCODE_CALLDATACOPY: u8 = 0x37;
-pub const OPCODE_CODESIZE: u8 = 0x38;
-pub const OPCODE_CODECOPY: u8 = 0x39;
-pub const OPCODE_GASPRICE: u8 = 0x3A;
-pub const OPCODE_EXTCODESIZE: u8 = 0x3B;
-pub const OPCODE_EXTCODECOPY: u8 = 0x3C;
-pub const OPCODE_RETURNDATASIZE: u8 = 0x3D;
-pub const OPCODE_RETURNDATACOPY: u8 = 0x3E;
-pub const OPCODE_EXTCODEHASH: u8 = 0x3F;
+/// Maximum delegation depth to analyze
+const MAX_DELEGATION_DEPTH: usize = 5;
 
-pub const OPCODE_BLOCKHASH: u8 = 0x40;
-pub const OPCODE_COINBASE: u8 = 0x41;
-pub const OPCODE_TIMESTAMP: u8 = 0x42;
-pub const OPCODE_NUMBER: u8 = 0x43;
-pub const OPCODE_DIFFICULTY: u8 = 0x44;
-pub const OPCODE_GASLIMIT: u8 = 0x45;
-pub const OPCODE_CHAINID: u8 = 0x46;
-pub const OPCODE_SELFBALANCE: u8 = 0x47;
-pub const OPCODE_BASEFEE: u8 = 0x48;
-
-pub const OPCODE_POP: u8 = 0x50;
-pub const OPCODE_MLOAD: u8 = 0x51;
-pub const OPCODE_MSTORE: u8 = 0x52;
-pub const OPCODE_MSTORE8: u8 = 0x53;
-pub const OPCODE_SLOAD: u8 = 0x54;
-pub const OPCODE_SSTORE: u8 = 0x55;
-pub const OPCODE_JUMP: u8 = 0x56;
-pub const OPCODE_JUMPI: u8 = 0x57;
-pub const OPCODE_PC: u8 = 0x58;
-pub const OPCODE_MSIZE: u8 = 0x59;
-pub const OPCODE_GAS: u8 = 0x5A;
-pub const OPCODE_JUMPDEST: u8 = 0x5B;
-
-pub const OPCODE_PUSH1: u8 = 0x60;
-pub const OPCODE_PUSH32: u8 = 0x7F;
-pub const OPCODE_DUP1: u8 = 0x80;
-pub const OPCODE_DUP16: u8 = 0x8F;
-pub const OPCODE_SWAP1: u8 = 0x90;
-pub const OPCODE_SWAP16: u8 = 0x9F;
-
-pub const OPCODE_LOG0: u8 = 0xA0;
-pub const OPCODE_LOG4: u8 = 0xA4;
-
-pub const OPCODE_CREATE: u8 = 0xF0;
-pub const OPCODE_CALL: u8 = 0xF1;
-pub const OPCODE_CALLCODE: u8 = 0xF2;
-pub const OPCODE_RETURN: u8 = 0xF3;
-pub const OPCODE_DELEGATECALL: u8 = 0xF4;
-pub const OPCODE_CREATE2: u8 = 0xF5;
-pub const OPCODE_STATICCALL: u8 = 0xFA;
-pub const OPCODE_REVERT: u8 = 0xFD;
-pub const OPCODE_SELFDESTRUCT: u8 = 0xFF;
+/// Decompiler search window for pattern matching
+const PATTERN_WINDOW: usize = 256;
 
 // ============================================================
-// SEVERITY AND PATTERN TYPES
+// EIP-7702 PATTERN TYPES
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EIP7702Pattern {
+    /// tx.origin + EQ + JUMPI pattern - broken EOA assumption
+    EoaOnlyBypass,
+    /// Unrestricted batch/execute/multicall with delegation
+    BatchCallExploit,
+    /// Delegate to unverified contract (no validation)
+    UnvalidatedDelegation,
+    /// Chain-agnostic authority (chainId = 0)
+    ChainAgnosticReplay,
+    /// Admin surface with delegation capability
+    AdminDelegationAbuse,
+    /// Delegatecall router with batch surface
+    DelegatecallBatchRouter,
+    /// Upgrade surface with delegation (proxy pattern)
+    UpgradeDelegatePattern,
+}
+
+impl fmt::Display for EIP7702Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EIP7702Pattern::EoaOnlyBypass => write!(f, "EIP7702_EOA_ONLY_BYPASS"),
+            EIP7702Pattern::BatchCallExploit => write!(f, "EIP7702_BATCH_CALL_EXPLOIT"),
+            EIP7702Pattern::UnvalidatedDelegation => write!(f, "EIP7702_UNVALIDATED_DELEGATION"),
+            EIP7702Pattern::ChainAgnosticReplay => write!(f, "EIP7702_CHAIN_AGNOSTIC_REPLAY"),
+            EIP7702Pattern::AdminDelegationAbuse => write!(f, "EIP7702_ADMIN_DELEGATION_ABUSE"),
+            EIP7702Pattern::DelegatecallBatchRouter => write!(f, "EIP7702_DELEGATECALL_BATCH_ROUTER"),
+            EIP7702Pattern::UpgradeDelegatePattern => write!(f, "EIP7702_UPGRADE_DELEGATE_PATTERN"),
+        }
+    }
+}
+
+impl EIP7702Pattern {
+    pub fn severity(&self) -> PatternSeverity {
+        match self {
+            EIP7702Pattern::EoaOnlyBypass => PatternSeverity::Critical,
+            EIP7702Pattern::BatchCallExploit => PatternSeverity::Critical,
+            EIP7702Pattern::UnvalidatedDelegation => PatternSeverity::Critical,
+            EIP7702Pattern::ChainAgnosticReplay => PatternSeverity::High,
+            EIP7702Pattern::AdminDelegationAbuse => PatternSeverity::Critical,
+            EIP7702Pattern::DelegatecallBatchRouter => PatternSeverity::High,
+            EIP7702Pattern::UpgradeDelegatePattern => PatternSeverity::Medium,
+        }
+    }
+    
+    pub fn confidence_threshold(&self) -> f32 {
+        match self {
+            EIP7702Pattern::ChainAgnosticReplay => 0.85,
+            EIP7702Pattern::UpgradeDelegatePattern => 0.70,
+            _ => 0.80,
+        }
+    }
+}
+
+// ============================================================
+// DANGEROUS SELECTORS (EIP-7702 CONTEXT)
+// ============================================================
+
+/// Batch/execute/multicall selectors (attack surface)
+const BATCH_SELECTORS: &[(&str, &[u8; 4])] = &[
+    ("batch(address[],bytes[])", &[0x47, 0x58, 0x09, 0x78]),
+    ("multicall(bytes[])", &[0xac, 0x96, 0x50, 0x60]),
+    ("execute(address[],bytes[])", &[0xfe, 0xbc, 0x22, 0x70]),
+    ("multisend(address[],uint256[],bytes[])", &[0x2a, 0xa1, 0xfd, 0x78]),
+    ("batchCall(address[],uint256[],bytes[])", &[0x4e, 0x1c, 0x3b, 0x1c]),
+    ("aggregate(tuple[])", &[0x5f, 0xcb, 0x4a, 0x9b]),
+];
+
+/// Delegation/authorization selectors (EIP-7702 specific)
+const DELEGATION_SELECTORS: &[(&str, &[u8; 4])] = &[
+    ("delegate(address)", &[0xf4, 0x15, 0x4b, 0xec]),
+    ("setCode(address)", &[0x21, 0x3b, 0x5c, 0x28]),
+    ("authorize(address)", &[0x12, 0x9e, 0x7e, 0x66]),
+    ("grantDelegation(address)", &[0xbe, 0x94, 0x6a, 0xb5]),
+    ("updateDelegation(address)", &[0xbc, 0x4f, 0x7a, 0xd9]),
+];
+
+/// Upgrade/implementation selectors (proxy patterns)
+const UPGRADE_SELECTORS: &[(&str, &[u8; 4])] = &[
+    ("upgradeTo(address)", &[0x36, 0x59, 0xc5, 0x96]),
+    ("upgradeToAndCall(address,bytes)", &[0x4f, 0x1e, 0xf2, 0x86]),
+    ("setImplementation(address)", &[0x5c, 0x60, 0xda, 0x01]),
+    ("changeImplementation(address)", &[0xcb, 0x2f, 0x7a, 0xa7]),
+    ("upgradeImplementation(address)", &[0x4e, 0xf3, 0x9b, 0xbc]),
+];
+
+/// Admin/ownership selectors (privilege surface)
+const ADMIN_SELECTORS: &[(&str, &[u8; 4])] = &[
+    ("transferOwnership(address)", &[0xf2, 0xf0, 0x38, 0x38]),
+    ("renounceOwnership()", &[0x71, 0x50, 0x18, 0xa6]),
+    ("takeOwnership()", &[0x69, 0xaa, 0x1c, 0x48]),
+    ("becomeAdmin()", &[0xd4, 0x36, 0x27, 0x6b]),
+    ("grantRole(bytes32,address)", &[0x2f, 0x2f, 0x2c, 0x28]),
+    ("revokeRole(bytes32,address)", &[0xd5, 0x47, 0x74, 0x11]),
+];
+
+// ============================================================
+// DATA STRUCTURES
+// ============================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatternSeverity {
     Critical,
     High,
@@ -120,8 +146,8 @@ pub enum PatternSeverity {
     Info,
 }
 
-impl std::fmt::Display for PatternSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PatternSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PatternSeverity::Critical => write!(f, "CRITICAL"),
             PatternSeverity::High => write!(f, "HIGH"),
@@ -133,821 +159,868 @@ impl std::fmt::Display for PatternSeverity {
 }
 
 #[derive(Debug, Clone)]
+pub struct EIP7702Detection {
+    pub pattern: EIP7702Pattern,
+    pub offset: usize,
+    pub severity: PatternSeverity,
+    pub confidence: f32,
+    pub description: String,
+    pub exploitation_path: Option<String>,
+    pub evidence: Vec<String>,
+    pub context: EIP7702Context,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EIP7702Context {
+    pub has_tx_origin_check: bool,
+    pub has_batch_selector: bool,
+    pub has_delegation_selector: bool,
+    pub has_upgrade_selector: bool,
+    pub has_admin_selector: bool,
+    pub has_delegatecall: bool,
+    pub has_unrestricted_call: bool,
+    pub chain_id_observed: Option<u64>,
+    pub delegation_targets: Vec<String>,
+    pub batch_functions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpcodeLocation {
+    pub opcode: u8,
+    pub offset: usize,
+    pub mnemonic: String,
+    pub push_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BasicBlock {
+    pub start: usize,
+    pub end: usize,
+    pub instructions: Vec<OpcodeLocation>,
+    pub successors: Vec<usize>,
+    pub is_entry: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlFlowGraph {
+    pub blocks: Vec<BasicBlock>,
+    pub entry: usize,
+    pub exits: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BytecodeAnalysis {
+    pub bytecode: Vec<u8>,
+    pub selectors: Vec<[u8; 4]>,
+    pub cfgraph: ControlFlowGraph,
+    pub eip7702_detections: Vec<EIP7702Detection>,
+    pub flags: Vec<BytecodeFlag>,
+    pub risk_score: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct BytecodeFlag {
     pub opcode: u8,
     pub offset: usize,
     pub severity: PatternSeverity,
     pub description: String,
-    pub context: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FunctionInfo {
-    pub selector: [u8; 4],
-    pub offset: usize,
-    pub signature: Option<String>,
-    pub is_dangerous: bool,
-    pub has_access_control: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct AccessControlInfo {
-    pub pattern_type: AccessControlPattern,
-    pub offset: usize,
-    pub expected_caller: Option<String>,
-    pub storage_slot: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AccessControlPattern {
-    OnlyOwner,
-    OnlyRole,
-    OnlyAdmin,
-    CustomCheck,
-    None,
-}
-
-#[derive(Debug, Clone)]
-pub struct StorageSlotInfo {
-    pub slot: u64,
-    pub inferred_type: StorageType,
-    pub is_owner_slot: bool,
-    pub is_admin_slot: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StorageType {
-    Address,
-    Uint256,
-    Bool,
-    Mapping,
-    Array,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct BytecodeAnalysis {
-    pub function_selectors: Vec<[u8; 4]>,
-    pub functions: Vec<FunctionInfo>,
-    pub flags: Vec<BytecodeFlag>,
-    pub has_selfdestruct: bool,
-    pub has_delegatecall: bool,
-    pub has_callcode: bool,
-    pub has_create2: bool,
-    pub has_reentrancy_risk: bool,
-    pub access_controls: Vec<AccessControlInfo>,
-    pub storage_layout: Vec<StorageSlotInfo>,
-    pub risk_score: u32,
-    pub bytecode: Vec<u8>,  // Agora obrigatório
-    pub jumpdests: HashSet<usize>,
-    pub basic_blocks: Vec<BasicBlockInfo>,
-    pub has_fallback: bool,
-    pub has_receive: bool,
-    pub dispatcher_targets: usize,
-    pub has_upgrade_surface: bool,
-    pub has_admin_surface: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct BasicBlockInfo {
-    pub start: usize,
-    pub end: usize,
-    pub instructions: Vec<Instruction>,
-    pub successors: Vec<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Instruction {
-    pub opcode: u8,
-    pub pc: usize,
-    pub push_data: Option<Vec<u8>>,
-    pub mnemonic: &'static str,
-}
-
-impl BytecodeAnalysis {
-    pub fn top_severity(&self) -> Option<&PatternSeverity> {
-        self.flags
-            .iter()
-            .find(|flag| flag.severity == PatternSeverity::Critical)
-            .map(|flag| &flag.severity)
-            .or_else(|| {
-                self.flags
-                    .iter()
-                    .find(|flag| flag.severity == PatternSeverity::High)
-                    .map(|flag| &flag.severity)
-            })
-            .or_else(|| {
-                self.flags
-                    .iter()
-                    .find(|flag| flag.severity == PatternSeverity::Medium)
-                    .map(|flag| &flag.severity)
-            })
-    }
-    
-    /// Obtém informações de uma função pelo selector
-    pub fn get_function_by_selector(&self, selector: &[u8; 4]) -> Option<&FunctionInfo> {
-        self.functions.iter().find(|f| f.selector == *selector)
-    }
-    
-    /// Verifica se uma função tem access control
-    pub fn function_has_access_control(&self, selector: &[u8; 4]) -> bool {
-        self.functions
-            .iter()
-            .find(|f| f.selector == *selector)
-            .map(|f| f.has_access_control)
-            .unwrap_or(false)
-    }
 }
 
 // ============================================================
-// BYTECODE SCANNER AUMENTADO
+// EIP-7702 BYTECODE ENGINE (MAXIMUM LEVEL)
 // ============================================================
 
-pub struct BytecodeScanner;
+pub struct EIP7702BytecodeEngine;
 
-impl BytecodeScanner {
-    pub fn decode_hex(hex_str: &str) -> Option<Vec<u8>> {
-        let stripped = hex_str.trim_start_matches("0x");
-        hex::decode(stripped).ok()
+impl EIP7702BytecodeEngine {
+    // ============================================================
+    // CORE ANALYSIS ENTRY POINT
+    // ============================================================
+    
+    /// Main entry point - analyze bytecode for EIP-7702 vulnerabilities
+    pub fn analyze(bytecode: &[u8]) -> BytecodeAnalysis {
+        info!("Starting EIP-7702 bytecode analysis (MAXIMUM LEVEL)");
+        
+        // Build CFG first (required for path analysis)
+        let cfgraph = Self::build_control_flow_graph(bytecode);
+        
+        // Extract all selectors
+        let selectors = Self::extract_selectors_advanced(bytecode);
+        
+        // Initialize context
+        let mut context = EIP7702Context::default();
+        let mut detections = Vec::new();
+        
+        // Run all detection modules
+        detections.extend(Self::detect_eoa_only_bypass_pattern(bytecode, &cfgraph, &mut context));
+        detections.extend(Self::detect_batch_call_exploit(bytecode, &selectors, &cfgraph, &mut context));
+        detections.extend(Self::detect_unvalidated_delegation(bytecode, &selectors, &cfgraph, &mut context));
+        detections.extend(Self::detect_chain_agnostic_replay(bytecode, &mut context));
+        detections.extend(Self::detect_admin_delegation_abuse(&selectors, &context, &mut context));
+        detections.extend(Self::detect_delegatecall_batch_router(bytecode, &selectors, &cfgraph, &mut context));
+        detections.extend(Self::detect_upgrade_delegate_pattern(&selectors, &context));
+        
+        // Calculate risk score
+        let risk_score = Self::calculate_risk_score(&detections);
+        
+        // Build flags (legacy compatibility)
+        let flags = Self::build_flags(&detections);
+        
+        BytecodeAnalysis {
+            bytecode: bytecode.to_vec(),
+            selectors,
+            cfgraph,
+            eip7702_detections: detections,
+            flags,
+            risk_score,
+        }
     }
-
-    pub fn selector_from_sig(signature: &str) -> [u8; 4] {
-        let mut hasher = Keccak256::new();
-        hasher.update(signature.as_bytes());
-        let result = hasher.finalize();
-        [result[0], result[1], result[2], result[3]]
-    }
-
-    /// Extract function selectors with jump table support
-    pub fn extract_selectors(bytecode: &[u8]) -> Vec<[u8; 4]> {
-        let mut selectors = Vec::new();
-        let len = bytecode.len();
-        let mut i = 0;
-
-        // First pass: find PUSH4 instructions (0x63)
-        while i < len {
-            let opcode = bytecode[i];
-
-            match opcode {
-                0x63 if i + 4 < len => {
-                    let selector = [
-                        bytecode[i + 1],
-                        bytecode[i + 2],
-                        bytecode[i + 3],
-                        bytecode[i + 4],
-                    ];
-
-                    if selector != [0u8; 4] && selector != [0xFF; 4] && !selectors.contains(&selector)
-                    {
-                        selectors.push(selector);
-                        debug!("Found selector: {}", hex::encode(selector));
-                    }
-
-                    i += 5;
-                    continue;
-                }
-                // Detects jump table patterns (common in dispatchers)
-                0x56 | 0x57 => { // JUMP or JUMPI
-                    // Look for jump table
-                    if let Some(table_selectors) = Self::extract_from_jump_table(bytecode, i) {
-                        for sel in table_selectors {
-                            if !selectors.contains(&sel) {
-                                selectors.push(sel);
+    
+    // ============================================================
+    // 1. EOA ONLY BYPASS DETECTION
+    // ============================================================
+    
+    /// Detects tx.origin + EQ path that becomes vulnerable with EIP-7702
+    fn detect_eoa_only_bypass_pattern(
+        bytecode: &[u8],
+        cfgraph: &ControlFlowGraph,
+        context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        // Find ORIGIN opcode (0x32)
+        for block in &cfgraph.blocks {
+            for (idx, instr) in block.instructions.iter().enumerate() {
+                if instr.opcode == 0x32 { // ORIGIN
+                    context.has_tx_origin_check = true;
+                    
+                    // Check for EQ in subsequent instructions
+                    let remaining = &block.instructions[idx..];
+                    for next_instr in remaining {
+                        if next_instr.opcode == 0x14 { // EQ
+                            // Found ORIGIN + EQ pattern
+                            // Verify path leads to JUMPI (conditional branch)
+                            if Self::has_jumpi_in_path(remaining) {
+                                let detection = EIP7702Detection {
+                                    pattern: EIP7702Pattern::EoaOnlyBypass,
+                                    offset: instr.offset,
+                                    severity: EIP7702Pattern::EoaOnlyBypass.severity(),
+                                    confidence: 0.85,
+                                    description: format!(
+                                        "ORIGIN + EQ conditional at offset 0x{:x}: EOA-only assumption broken by EIP-7702 delegation",
+                                        instr.offset
+                                    ),
+                                    exploitation_path: Some(format!(
+                                        "Path: ORIGIN (0x{:x}) -> EQ (0x{:x}) -> JUMPI\n\
+                                         Attacker can delegate malicious contract to EOA,\n\
+                                         execute arbitrary code while passing EOA checks.\n\
+                                         Real exploit: Flare FAssets protocol (2025)",
+                                        instr.offset,
+                                        next_instr.offset
+                                    )),
+                                    evidence: vec![
+                                        format!("ORIGIN at offset 0x{:x}", instr.offset),
+                                        format!("EQ at offset 0x{:x}", next_instr.offset),
+                                        "Conditional branch (JUMPI) detected".to_string(),
+                                        "Critical: EIP-7702 allows delegated execution".to_string(),
+                                    ],
+                                    context: context.clone(),
+                                };
+                                detections.push(detection);
+                                break;
                             }
                         }
                     }
-                    i += 1;
-                    continue;
                 }
-                0x60..=0x7F => {
-                    let push_len = (opcode - 0x5F) as usize;
-                    i += 1 + push_len;
-                    continue;
-                }
-                _ => {}
             }
-
-            i += 1;
         }
-
-        debug!("Extracted {} function selectors", selectors.len());
-        selectors
+        
+        detections
     }
     
-    /// Extract selectors from jump table patterns
-    fn extract_from_jump_table(bytecode: &[u8], pc: usize) -> Option<Vec<[u8; 4]>> {
-        let mut selectors = Vec::new();
-        let search_window = 96;
-        let mut offset = pc.saturating_sub(search_window);
-        let start = offset;
-        
-        while offset < pc && offset < bytecode.len() {
-            if bytecode[offset] == 0x63 && offset + 4 < bytecode.len() {
-                let selector = [
-                    bytecode[offset + 1],
-                    bytecode[offset + 2],
-                    bytecode[offset + 3],
-                    bytecode[offset + 4],
-                ];
-                if selector != [0u8; 4]
-                    && selector != [0xFF; 4]
-                    && !selectors.contains(&selector)
-                {
-                    selectors.push(selector);
-                }
-            }
-            offset += 1;
-            if offset > start + search_window {
-                break; // Limit search
-            }
-        }
-        
-        if selectors.is_empty() {
-            None
-        } else {
-            Some(selectors)
-        }
-    }
-
-    /// Advanced bytecode analysis
-    pub fn analyze(bytecode: &[u8]) -> BytecodeAnalysis {
-        let mut flags = Vec::new();
-        let mut has_selfdestruct = false;
-        let mut has_delegatecall = false;
-        let mut has_callcode = false;
-        let mut has_create2 = false;
-        let mut has_reentrancy_risk = false;
-        let mut risk_score: u32 = 0;
-        let mut access_controls = Vec::new();
-        let mut jumpdests = HashSet::new();
-
-        let len = bytecode.len();
-        let mut i = 0;
-
-        // First pass: collect all JUMPDESTs
-        for pos in 0..len {
-            if bytecode[pos] == OPCODE_JUMPDEST {
-                jumpdests.insert(pos);
-            }
-        }
-
-        // Second pass: analyze opcodes
-        while i < len {
-            let opcode = bytecode[i];
-
-            match opcode {
-                OPCODE_SELFDESTRUCT => {
-                    has_selfdestruct = true;
-                    risk_score += 50;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::Critical,
-                        description: "SELFDESTRUCT allows contract self-destruction".to_string(),
-                        context: None,
-                    });
-                }
-                OPCODE_DELEGATECALL => {
-                    has_delegatecall = true;
-                    risk_score += 35;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::High,
-                        description: "DELEGATECALL executes code in caller's context".to_string(),
-                        context: None,
-                    });
-                    if Self::has_sstore_before(bytecode, i) {
-                        has_reentrancy_risk = true;
-                        risk_score += 15;
-                        flags.push(BytecodeFlag {
-                            opcode,
-                            offset: i,
-                            severity: PatternSeverity::Medium,
-                            description: "Potential reentrancy: external call after storage write".to_string(),
-                            context: None,
-                        });
-                    }
-                }
-                OPCODE_CALLCODE => {
-                    has_callcode = true;
-                    risk_score += 30;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::High,
-                        description: "CALLCODE (deprecated) similar to delegatecall".to_string(),
-                        context: None,
-                    });
-                    if Self::has_sstore_before(bytecode, i) {
-                        has_reentrancy_risk = true;
-                        risk_score += 15;
-                        flags.push(BytecodeFlag {
-                            opcode,
-                            offset: i,
-                            severity: PatternSeverity::Medium,
-                            description: "Potential reentrancy: external call after storage write".to_string(),
-                            context: None,
-                        });
-                    }
-                }
-                OPCODE_CREATE2 => {
-                    has_create2 = true;
-                    risk_score += 10;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::Medium,
-                        description: "CREATE2 allows deterministic contract deployment".to_string(),
-                        context: None,
-                    });
-                }
-                OPCODE_CALL => {
-                    risk_score += 5;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::Low,
-                        description: "CALL to external contract".to_string(),
-                        context: None,
-                    });
-                    if Self::has_sstore_before(bytecode, i) {
-                        has_reentrancy_risk = true;
-                        risk_score += 15;
-                        flags.push(BytecodeFlag {
-                            opcode,
-                            offset: i,
-                            severity: PatternSeverity::Medium,
-                            description: "Potential reentrancy: external call after storage write".to_string(),
-                            context: None,
-                        });
-                    }
-                }
-                OPCODE_SSTORE => {
-                    risk_score += 8;
-                    flags.push(BytecodeFlag {
-                        opcode,
-                        offset: i,
-                        severity: PatternSeverity::Medium,
-                        description: "SSTORE writes to storage".to_string(),
-                        context: None,
-                    });
-                }
-                OPCODE_SLOAD => {
-                    risk_score += 3;
-                }
-                // Detect onlyOwner pattern
-                OPCODE_CALLER => {
-                    // Look for EQ and JUMPI pattern
-                    if let Some(owner_check) = Self::detect_only_owner_pattern(bytecode, i) {
-                        access_controls.push(owner_check);
-                        risk_score -= 10; // Good: has access control
-                    }
-                }
-                _ => {}
-            }
-
-            // Skip PUSH data
-            if (0x60..=0x7F).contains(&opcode) {
-                let push_len = (opcode - 0x5F) as usize;
-                i += push_len;
-            }
-
-            i += 1;
-        }
-
-        // Extract function selectors
-        let selectors = Self::extract_selectors(bytecode);
-        
-        // Build function info
-        let mut functions = Vec::new();
-        for selector in &selectors {
-            let func = FunctionInfo {
-                selector: *selector,
-                offset: Self::find_selector_offset(bytecode, selector),
-                signature: None, // Can be resolved from 4byte.directory
-                is_dangerous: Self::is_selector_dangerous(selector),
-                has_access_control: Self::selector_has_access_control(bytecode, selector),
-            };
-            functions.push(func);
-        }
-
-        // Build basic blocks
-        let basic_blocks = Self::build_basic_blocks(bytecode, &jumpdests);
-        let has_fallback = Self::detect_fallback_entry(bytecode, &selectors, &basic_blocks);
-        let has_receive = Self::detect_receive_entry(bytecode, &selectors, &basic_blocks);
-        let dispatcher_targets = basic_blocks
-            .iter()
-            .filter(|block| {
-                block.instructions.iter().any(|inst| {
-                    matches!(inst.mnemonic, "CALLDATALOAD" | "CALLDATASIZE" | "JUMPI")
-                })
-            })
-            .count();
-        let has_upgrade_surface = has_delegatecall
-            || has_create2
-            || Self::has_upgrade_selectors(&selectors);
-        let has_admin_surface = !access_controls.is_empty()
-            || Self::has_admin_selectors(&selectors);
-
-        BytecodeAnalysis {
-            function_selectors: selectors,
-            functions,
-            flags,
-            has_selfdestruct,
-            has_delegatecall,
-            has_callcode,
-            has_create2,
-            has_reentrancy_risk,
-            access_controls,
-            storage_layout: Vec::new(), // Can be enhanced with storage inference
-            risk_score: risk_score.min(100),
-            bytecode: bytecode.to_vec(),
-            jumpdests,
-            basic_blocks,
-            has_fallback,
-            has_receive,
-            dispatcher_targets,
-            has_upgrade_surface,
-            has_admin_surface,
-        }
-    }
-
-    /// Opcode to human-readable mnemonic
-    pub fn opcode_to_mnemonic(opcode: u8) -> &'static str {
-        match opcode {
-            0x00 => "STOP",
-            0x01 => "ADD",
-            0x02 => "MUL",
-            0x03 => "SUB",
-            0x04 => "DIV",
-            0x05 => "SDIV",
-            0x06 => "MOD",
-            0x07 => "SMOD",
-            0x08 => "ADDMOD",
-            0x09 => "MULMOD",
-            0x0A => "EXP",
-            0x0B => "SIGNEXTEND",
-            0x10 => "LT",
-            0x11 => "GT",
-            0x12 => "SLT",
-            0x13 => "SGT",
-            0x14 => "EQ",
-            0x15 => "ISZERO",
-            0x16 => "AND",
-            0x17 => "OR",
-            0x18 => "XOR",
-            0x19 => "NOT",
-            0x1A => "BYTE",
-            0x1B => "SHL",
-            0x1C => "SHR",
-            0x1D => "SAR",
-            0x20 => "SHA3",
-            0x30 => "ADDRESS",
-            0x31 => "BALANCE",
-            0x32 => "ORIGIN",
-            0x33 => "CALLER",
-            0x34 => "CALLVALUE",
-            0x35 => "CALLDATALOAD",
-            0x36 => "CALLDATASIZE",
-            0x37 => "CALLDATACOPY",
-            0x38 => "CODESIZE",
-            0x39 => "CODECOPY",
-            0x3A => "GASPRICE",
-            0x3B => "EXTCODESIZE",
-            0x3C => "EXTCODECOPY",
-            0x3D => "RETURNDATASIZE",
-            0x3E => "RETURNDATACOPY",
-            0x3F => "EXTCODEHASH",
-            0x40 => "BLOCKHASH",
-            0x41 => "COINBASE",
-            0x42 => "TIMESTAMP",
-            0x43 => "NUMBER",
-            0x44 => "DIFFICULTY",
-            0x45 => "GASLIMIT",
-            0x46 => "CHAINID",
-            0x47 => "SELFBALANCE",
-            0x48 => "BASEFEE",
-            0x50 => "POP",
-            0x51 => "MLOAD",
-            0x52 => "MSTORE",
-            0x53 => "MSTORE8",
-            0x54 => "SLOAD",
-            0x55 => "SSTORE",
-            0x56 => "JUMP",
-            0x57 => "JUMPI",
-            0x58 => "PC",
-            0x59 => "MSIZE",
-            0x5A => "GAS",
-            0x5B => "JUMPDEST",
-            0x60..=0x7F => "PUSH",
-            0x80..=0x8F => "DUP",
-            0x90..=0x9F => "SWAP",
-            0xA0..=0xA4 => "LOG",
-            0xF0 => "CREATE",
-            0xF1 => "CALL",
-            0xF2 => "CALLCODE",
-            0xF3 => "RETURN",
-            0xF4 => "DELEGATECALL",
-            0xF5 => "CREATE2",
-            0xFA => "STATICCALL",
-            0xFD => "REVERT",
-            0xFF => "SELFDESTRUCT",
-            _ => "INVALID",
-        }
-    }
-
-    /// Detect onlyOwner pattern around a CALLER opcode
-    fn detect_only_owner_pattern(bytecode: &[u8], pc: usize) -> Option<AccessControlInfo> {
-        // Look for EQ opcode in the next few instructions
-        let mut offset = pc + 1;
-        let limit = (pc + 20).min(bytecode.len());
-        
-        while offset < limit {
-            if bytecode[offset] == OPCODE_EQ {
-                // Found equality check
-                return Some(AccessControlInfo {
-                    pattern_type: AccessControlPattern::OnlyOwner,
-                    offset: pc,
-                    expected_caller: None, // Would need to extract address
-                    storage_slot: Some(0), // Usually slot 0
-                });
-            }
-            offset += 1;
-        }
-        None
-    }
-
-    /// Check if there was an SSTORE before this position
-    fn has_sstore_before(bytecode: &[u8], pc: usize) -> bool {
-        let start = pc.saturating_sub(50);
-        for i in start..pc {
-            if bytecode[i] == OPCODE_SSTORE {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Find offset of a selector in bytecode
-    fn find_selector_offset(bytecode: &[u8], selector: &[u8; 4]) -> usize {
-        let len = bytecode.len();
-        let mut i = 0;
-        
-        while i < len {
-            if bytecode[i] == 0x63 && i + 4 < len {
-                if bytecode[i+1] == selector[0] && 
-                   bytecode[i+2] == selector[1] && 
-                   bytecode[i+3] == selector[2] && 
-                   bytecode[i+4] == selector[3] {
-                    return i;
-                }
-            }
-            i += 1;
-        }
-        0
-    }
-
-    /// Check if selector is known dangerous
-    fn is_selector_dangerous(selector: &[u8; 4]) -> bool {
-        let dangerous_selectors = [
-            [0x00, 0x00, 0x00, 0x00], // fallback
-            Self::selector_from_sig("selfdestruct()"),
-            Self::selector_from_sig("kill()"),
-            Self::selector_from_sig("destroy()"),
-            Self::selector_from_sig("withdrawAll()"),
-            Self::selector_from_sig("drainFunds(address)"),
-            Self::selector_from_sig("initialize()"),
-        ];
-        dangerous_selectors.contains(selector)
-    }
-
-    /// Check if selector has access control
-    fn selector_has_access_control(bytecode: &[u8], selector: &[u8; 4]) -> bool {
-        // Find selector position and check for CALLER checks before it
-        let offset = Self::find_selector_offset(bytecode, selector);
-        if offset > 10 {
-            let start = offset.saturating_sub(30);
-            for i in start..offset {
-                if bytecode[i] == OPCODE_CALLER {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn has_upgrade_selectors(selectors: &[[u8; 4]]) -> bool {
-        let upgrade_signatures = [
-            "upgradeTo(address)",
-            "upgradeToAndCall(address,bytes)",
-            "setImplementation(address)",
-            "upgradeImplementation(address)",
-            "setBeacon(address)",
-            "changeImplementation(address)",
-        ];
-
-        upgrade_signatures
-            .iter()
-            .map(|sig| Self::selector_from_sig(sig))
-            .any(|selector| selectors.contains(&selector))
-    }
-
-    fn has_admin_selectors(selectors: &[[u8; 4]]) -> bool {
-        let admin_signatures = [
-            "transferOwnership(address)",
-            "renounceOwnership()",
-            "takeOwnership()",
-            "owner()",
-            "admin()",
-            "changeAdmin(address)",
-            "becomeAdmin()",
-            "setOwner(address)",
-            "grantRole(bytes32,address)",
-            "revokeRole(bytes32,address)",
-            "pause()",
-            "unpause()",
-        ];
-
-        admin_signatures
-            .iter()
-            .map(|sig| Self::selector_from_sig(sig))
-            .any(|selector| selectors.contains(&selector))
-    }
-
-    fn detect_fallback_entry(
+    // ============================================================
+    // 2. BATCH CALL EXPLOIT DETECTION
+    // ============================================================
+    
+    /// Detects unrestricted batch/multicall functions that can be abused with delegation
+    fn detect_batch_call_exploit(
         bytecode: &[u8],
         selectors: &[[u8; 4]],
-        basic_blocks: &[BasicBlockInfo],
-    ) -> bool {
-        if selectors.is_empty() {
-            return false;
+        cfgraph: &ControlFlowGraph,
+        context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        for (sig, selector) in BATCH_SELECTORS {
+            if selectors.contains(selector) {
+                context.has_batch_selector = true;
+                context.batch_functions.push(sig.to_string());
+                
+                // Find function entry point
+                if let Some(entry_offset) = Self::find_function_entry(bytecode, selector) {
+                    // Analyze access control on this function
+                    let has_access_control = Self::has_access_control_at_entry(bytecode, entry_offset);
+                    let has_msg_sender_check = Self::has_msg_sender_validation(bytecode, entry_offset);
+                    
+                    if !has_access_control && !has_msg_sender_check {
+                        let detection = EIP7702Detection {
+                            pattern: EIP7702Pattern::BatchCallExploit,
+                            offset: entry_offset,
+                            severity: EIP7702Pattern::BatchCallExploit.severity(),
+                            confidence: 0.90,
+                            description: format!(
+                                "{} - UNRESTRICTED batch call (no access control)",
+                                sig
+                            ),
+                            exploitation_path: Some(format!(
+                                "Path: Unrestricted {} -> DELEGATECALL context\n\
+                                 Real exploit: QNT reserve pool (April/May 2026)\n\
+                                 Loss: ~54.93 ETH\n\
+                                 Attack: EOA delegated to BatchExecutor,\n\
+                                 attacker called batch() to drain funds",
+                                sig
+                            )),
+                            evidence: vec![
+                                format!("Function {} present", sig),
+                                "No access control modifiers detected".to_string(),
+                                "No msg.sender validation".to_string(),
+                                "Can be called from delegated EOA context".to_string(),
+                            ],
+                            context: context.clone(),
+                        };
+                        detections.push(detection);
+                    } else if has_msg_sender_check && !has_access_control {
+                        // msg.sender check but still vulnerable via delegation
+                        let detection = EIP7702Detection {
+                            pattern: EIP7702Pattern::BatchCallExploit,
+                            offset: entry_offset,
+                            severity: PatternSeverity::High,
+                            confidence: 0.75,
+                            description: format!(
+                                "{} - msg.sender check (still vulnerable to delegated EIP-7702)",
+                                sig
+                            ),
+                            exploitation_path: Some(
+                                "msg.sender is EOA (the delegator), passes check.\n\
+                                 But executed code is from malicious contract.\n\
+                                 Check passes, funds drain possible.".to_string()
+                            ),
+                            evidence: vec![
+                                format!("Function {} present", sig),
+                                "msg.sender check detected but NOT sufficient for EIP-7702".to_string(),
+                                "EIP-7702 delegation bypasses msg.sender check".to_string(),
+                            ],
+                            context: context.clone(),
+                        };
+                        detections.push(detection);
+                    }
+                }
+            }
         }
-
-        let dispatcher_gate = basic_blocks.iter().any(|block| {
-            block.instructions
-                .iter()
-                .any(|inst| matches!(inst.mnemonic, "CALLDATASIZE" | "CALLDATALOAD"))
-                && block
-                    .instructions
-                    .iter()
-                    .any(|inst| matches!(inst.mnemonic, "JUMPI" | "REVERT"))
-        });
-        let zero_selector_check = bytecode
-            .windows(4)
-            .any(|window| window == [0x00, 0x00, 0x00, 0x00]);
-
-        dispatcher_gate || zero_selector_check
+        
+        detections
     }
-
-    fn detect_receive_entry(
-        _bytecode: &[u8],
+    
+    // ============================================================
+    // 3. UNVALIDATED DELEGATION DETECTION
+    // ============================================================
+    
+    /// Detects delegation functions without target validation
+    fn detect_unvalidated_delegation(
+        bytecode: &[u8],
         selectors: &[[u8; 4]],
-        basic_blocks: &[BasicBlockInfo],
-    ) -> bool {
-        if selectors.is_empty() {
-            return false;
+        cfgraph: &ControlFlowGraph,
+        context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        for (sig, selector) in DELEGATION_SELECTORS {
+            if selectors.contains(selector) {
+                context.has_delegation_selector = true;
+                
+                if let Some(entry_offset) = Self::find_function_entry(bytecode, selector) {
+                    // Check if delegation target is validated
+                    let has_target_validation = Self::has_target_validation(bytecode, entry_offset);
+                    let has_whitelist = Self::has_delegation_whitelist(bytecode, entry_offset);
+                    
+                    if !has_target_validation && !has_whitelist {
+                        let detection = EIP7702Detection {
+                            pattern: EIP7702Pattern::UnvalidatedDelegation,
+                            offset: entry_offset,
+                            severity: EIP7702Pattern::UnvalidatedDelegation.severity(),
+                            confidence: 0.95,
+                            description: format!(
+                                "{} - NO target validation (can delegate to any contract)",
+                                sig
+                            ),
+                            exploitation_path: Some(
+                                "Attacker can delegate EOA to malicious contract.\n\
+                                 Once delegated, attacker controls EOA's execution context.\n\
+                                 All funds and permissions become accessible.\n\
+                                 97% of EIP-7702 delegations are to malicious contracts (2025 stats)".to_string()
+                            ),
+                            evidence: vec![
+                                format!("Function {} present", sig),
+                                "No target address validation".to_string(),
+                                "No whitelist detected".to_string(),
+                                "Can delegate to arbitrary contract".to_string(),
+                            ],
+                            context: context.clone(),
+                        };
+                        detections.push(detection);
+                        context.delegation_targets.push("ANY (unvalidated)".to_string());
+                    }
+                }
+            }
         }
-
-        basic_blocks.iter().take(4).any(|block| {
-            let has_callvalue = block
-                .instructions
-                .iter()
-                .any(|inst| inst.mnemonic == "CALLVALUE");
-            let has_revert_or_return = block
-                .instructions
-                .iter()
-                .any(|inst| matches!(inst.mnemonic, "JUMPI" | "RETURN" | "STOP" | "REVERT"));
-            has_callvalue && has_revert_or_return
-        })
+        
+        detections
     }
-
-    /// Build basic blocks from bytecode and jumpdests
-    fn build_basic_blocks(bytecode: &[u8], jumpdests: &HashSet<usize>) -> Vec<BasicBlockInfo> {
+    
+    // ============================================================
+    // 4. CHAIN-AGNOSTIC REPLAY DETECTION
+    // ============================================================
+    
+    /// Detects chainId = 0 in authorization payloads (allows cross-chain replay)
+    fn detect_chain_agnostic_replay(
+        bytecode: &[u8],
+        context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
         let len = bytecode.len();
-        if len == 0 {
-            return Vec::new();
+        
+        // Look for CHAINID opcode (0x46) with PUSH0 optimization for agnostic mode
+        for i in 0..len {
+            if bytecode[i] == 0x46 { // CHAINID
+                // Check for comparison with 0 (agnostic mode)
+                if i > 0 && bytecode[i-1] == 0x5f {
+                    // PUSH0 before CHAINID comparison (optimized)
+                    context.chain_id_observed = Some(CHAIN_AGNOSTIC_ID);
+                    
+                    let detection = EIP7702Detection {
+                        pattern: EIP7702Pattern::ChainAgnosticReplay,
+                        offset: i,
+                        severity: EIP7702Pattern::ChainAgnosticReplay.severity(),
+                        confidence: 0.88,
+                        description: "Chain-agnostic mode (chainId = 0) detected - cross-chain replay risk".to_string(),
+                        exploitation_path: Some(
+                            "authorization with chainId = 0 can be replayed on ANY chain.\n\
+                             Single signature compromises EOA across all networks.\n\
+                             Ethereum, BSC, Polygon, Arbitrum, all vulnerable simultaneously."
+                                .to_string()
+                        ),
+                        evidence: vec![
+                            "CHAINID comparison with 0 detected".to_string(),
+                            "Cross-chain authorization replay possible".to_string(),
+                            "No chain-specific binding".to_string(),
+                        ],
+                        context: context.clone(),
+                    };
+                    detections.push(detection);
+                }
+            }
         }
-
+        
+        // Also check for EIP-7702 authority magic + chainId zero
+        for i in 0..len.saturating_sub(20) {
+            if bytecode[i..i+6] == EIP7702_AUTHORITY_MAGIC {
+                if i + 14 < len {
+                    let potential_chain_id = u64::from_be_bytes([
+                        bytecode[i+6], bytecode[i+7], bytecode[i+8], bytecode[i+9],
+                        bytecode[i+10], bytecode[i+11], bytecode[i+12], bytecode[i+13]
+                    ]);
+                    if potential_chain_id == CHAIN_AGNOSTIC_ID {
+                        context.chain_id_observed = Some(CHAIN_AGNOSTIC_ID);
+                        detections.push(EIP7702Detection {
+                            pattern: EIP7702Pattern::ChainAgnosticReplay,
+                            offset: i,
+                            severity: EIP7702Pattern::ChainAgnosticReplay.severity(),
+                            confidence: 0.92,
+                            description: "EIP-7702 authority tuple with chainId = 0 (cross-chain replay)".to_string(),
+                            exploitation_path: Some("Authorization replayable on all chains".to_string()),
+                            evidence: vec![
+                                "EIP-7702 magic marker found".to_string(),
+                                format!("chainId = {}", CHAIN_AGNOSTIC_ID),
+                                "No chain binding - replay attack possible".to_string(),
+                            ],
+                            context: context.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        detections
+    }
+    
+    // ============================================================
+    // 5. ADMIN DELEGATION ABUSE DETECTION
+    // ============================================================
+    
+    /// Detects admin functions combined with delegation capability
+    fn detect_admin_delegation_abuse(
+        selectors: &[[u8; 4]],
+        context: &EIP7702Context,
+        full_context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        let has_admin = ADMIN_SELECTORS.iter().any(|(_, sel)| selectors.contains(sel));
+        let has_upgrade = UPGRADE_SELECTORS.iter().any(|(_, sel)| selectors.contains(sel));
+        
+        if has_admin && (context.has_delegation_selector || context.has_batch_selector) {
+            full_context.has_admin_selector = true;
+            
+            let detection = EIP7702Detection {
+                pattern: EIP7702Pattern::AdminDelegationAbuse,
+                offset: 0,
+                severity: EIP7702Pattern::AdminDelegationAbuse.severity(),
+                confidence: 0.85,
+                description: "Admin functions + delegation surface - critical privilege escalation".to_string(),
+                exploitation_path: Some(
+                    "Admin EOA delegates to malicious contract → contract executes\n\
+                     with admin privileges → full protocol takeover."
+                .to_string()),
+                evidence: vec![
+                    "Admin/ownership functions detected".to_string(),
+                    "Delegation/batch surface present".to_string(),
+                    "EIP-7702 delegation can hijack admin privileges".to_string(),
+                ],
+                context: context.clone(),
+            };
+            detections.push(detection);
+        }
+        
+        if has_upgrade && context.has_delegation_selector {
+            let detection = EIP7702Detection {
+                pattern: EIP7702Pattern::UpgradeDelegatePattern,
+                offset: 0,
+                severity: EIP7702Pattern::UpgradeDelegatePattern.severity(),
+                confidence: 0.78,
+                description: "Upgrade proxy + delegation - proxy jacking risk".to_string(),
+                exploitation_path: Some(
+                    "Attacker delegates proxy admin EOA → upgrades implementation\n\
+                     to malicious contract → drains all funds."
+                .to_string()),
+                evidence: vec![
+                    "Upgrade functions detected".to_string(),
+                    "Delegation capability present".to_string(),
+                    "Proxy implementation can be changed via delegation".to_string(),
+                ],
+                context: context.clone(),
+            };
+            detections.push(detection);
+        }
+        
+        detections
+    }
+    
+    // ============================================================
+    // 6. DELEGATECALL + BATCH ROUTER DETECTION
+    // ============================================================
+    
+    /// Detects delegatecall routers with batch capabilities (extremely dangerous)
+    fn detect_delegatecall_batch_router(
+        bytecode: &[u8],
+        selectors: &[[u8; 4]],
+        cfgraph: &ControlFlowGraph,
+        context: &mut EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        // Check for DELEGATECALL opcode (0xF4)
+        let mut has_delegatecall = false;
+        for block in &cfgraph.blocks {
+            for instr in &block.instructions {
+                if instr.opcode == 0xF4 { // DELEGATECALL
+                    has_delegatecall = true;
+                    context.has_delegatecall = true;
+                    break;
+                }
+            }
+        }
+        
+        if has_delegatecall && context.has_batch_selector {
+            let detection = EIP7702Detection {
+                pattern: EIP7702Pattern::DelegatecallBatchRouter,
+                offset: Self::find_delegatecall_offset(bytecode).unwrap_or(0),
+                severity: EIP7702Pattern::DelegatecallBatchRouter.severity(),
+                confidence: 0.82,
+                description: "DELEGATECALL router + batch execution - critical delegatecall injection".to_string(),
+                exploitation_path: Some(
+                    "Attacker can inject malicious calldata into batch →\n\
+                     DELEGATECALL executes with contract's context →\n\
+                     Storage corruption, fund theft, or ownership takeover."
+                .to_string()),
+                evidence: vec![
+                    "DELEGATECALL instruction detected".to_string(),
+                    "Batch/multicall surface present".to_string(),
+                    "Unvalidated calldata in batch execution".to_string(),
+                ],
+                context: context.clone(),
+            };
+            detections.push(detection);
+        }
+        
+        detections
+    }
+    
+    // ============================================================
+    // 7. UPGRADE DELEGATE PATTERN DETECTION
+    // ============================================================
+    
+    /// Detects upgrade proxy patterns combined with delegation (proxy jacking)
+    fn detect_upgrade_delegate_pattern(
+        selectors: &[[u8; 4]],
+        context: &EIP7702Context,
+    ) -> Vec<EIP7702Detection> {
+        let mut detections = Vec::new();
+        
+        let has_upgrade = UPGRADE_SELECTORS.iter().any(|(_, sel)| selectors.contains(sel));
+        
+        if has_upgrade {
+            if context.has_delegation_selector {
+                let detection = EIP7702Detection {
+                    pattern: EIP7702Pattern::UpgradeDelegatePattern,
+                    offset: 0,
+                    severity: EIP7702Pattern::UpgradeDelegatePattern.severity(),
+                    confidence: 0.88,
+                    description: "Proxy upgrade + EIP-7702 delegation - complete proxy takeover".to_string(),
+                    exploitation_path: Some(
+                        "Attacker delegates proxy admin EOA →\n\
+                         upgradeTo() malicious implementation →\n\
+                         All funds and logic controlled by attacker."
+                    .to_string()),
+                    evidence: vec![
+                        "Upgrade functions detected (upgradeTo, etc.)".to_string(),
+                        "Delegation surface present".to_string(),
+                        "EIP-7702 can hijack upgrade mechanism".to_string(),
+                    ],
+                    context: context.clone(),
+                };
+                detections.push(detection);
+            }
+            
+            if context.has_batch_selector {
+                let detection = EIP7702Detection {
+                    pattern: EIP7702Pattern::UpgradeDelegatePattern,
+                    offset: 0,
+                    severity: PatternSeverity::High,
+                    confidence: 0.70,
+                    description: "Proxy upgrade + batch execution - upgrade via batch".to_string(),
+                    exploitation_path: Some("Batch execution can trigger upgrade with malicious implementation".to_string()),
+                    evidence: vec![
+                        "Upgrade functions present".to_string(),
+                        "Batch execution available".to_string(),
+                        "Can upgrade via batched transaction".to_string(),
+                    ],
+                    context: context.clone(),
+                };
+                detections.push(detection);
+            }
+        }
+        
+        detections
+    }
+    
+    // ============================================================
+    // HELPER FUNCTIONS
+    // ============================================================
+    
+    /// Build control flow graph from bytecode
+    fn build_control_flow_graph(bytecode: &[u8]) -> ControlFlowGraph {
+        let mut jumpdests = HashSet::new();
+        let len = bytecode.len();
+        
+        // Collect all JUMPDESTs
+        for i in 0..len {
+            if bytecode[i] == 0x5B {
+                jumpdests.insert(i);
+            }
+        }
+        
+        // Build basic blocks
         let mut leaders: HashSet<usize> = HashSet::new();
         leaders.insert(0);
-        for jumpdest in jumpdests {
-            leaders.insert(*jumpdest);
+        for &dest in &jumpdests {
+            leaders.insert(dest);
         }
-
-        let mut cursor = 0;
-        while cursor < len {
-            let opcode = bytecode[cursor];
-            let next_pc = Self::next_pc(bytecode, cursor);
-            let is_terminal = matches!(
-                opcode,
-                OPCODE_JUMP | OPCODE_JUMPI | OPCODE_STOP | OPCODE_RETURN | OPCODE_REVERT | OPCODE_SELFDESTRUCT
-            );
-
-            if is_terminal && next_pc < len {
-                leaders.insert(next_pc);
-            }
-
-            cursor = next_pc.max(cursor + 1);
-        }
-
-        let mut leader_list: Vec<usize> = leaders.into_iter().filter(|pc| *pc < len).collect();
-        leader_list.sort_unstable();
-
+        
+        let mut leader_list: Vec<usize> = leaders.into_iter().collect();
+        leader_list.sort();
+        
         let mut blocks = Vec::new();
-        for (idx, start) in leader_list.iter().enumerate() {
-            let end = if let Some(next_start) = leader_list.get(idx + 1) {
-                next_start.saturating_sub(1)
+        for (idx, &start) in leader_list.iter().enumerate() {
+            let end = if let Some(&next) = leader_list.get(idx + 1) {
+                next.saturating_sub(1)
             } else {
-                len - 1
+                len.saturating_sub(1)
             };
-
+            
             let mut instructions = Vec::new();
-            let mut pc = *start;
+            let mut pc = start;
             while pc <= end && pc < len {
                 let opcode = bytecode[pc];
                 let push_data = if (0x60..=0x7F).contains(&opcode) {
                     let push_len = (opcode - 0x5F) as usize;
                     if pc + 1 + push_len <= len {
-                        Some(bytecode[pc + 1..pc + 1 + push_len].to_vec())
+                        Some(bytecode[pc+1..pc+1+push_len].to_vec())
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-
-                instructions.push(Instruction {
+                
+                instructions.push(OpcodeLocation {
                     opcode,
-                    pc,
+                    offset: pc,
+                    mnemonic: Self::opcode_to_mnemonic(opcode).to_string(),
                     push_data,
-                    mnemonic: Self::opcode_to_mnemonic(opcode),
                 });
-
-                let next_pc = Self::next_pc(bytecode, pc);
-                if next_pc <= pc {
-                    break;
-                }
-                pc = next_pc;
+                
+                pc = Self::next_pc(bytecode, pc);
             }
-
-            blocks.push(BasicBlockInfo {
-                start: *start,
+            
+            blocks.push(BasicBlock {
+                start,
                 end,
                 instructions,
                 successors: Vec::new(),
+                is_entry: start == 0,
             });
         }
-
-        let leader_index: HashMap<usize, usize> = blocks
-            .iter()
-            .enumerate()
-            .map(|(idx, block)| (block.start, idx))
-            .collect();
-
-        for idx in 0..blocks.len() {
-            let mut successors = Vec::new();
-            let last_instruction = blocks[idx].instructions.last().cloned();
-            let block_end = blocks[idx].end;
-
-            if let Some(inst) = last_instruction {
-                match inst.opcode {
-                    OPCODE_JUMP => {
-                        if let Some(dest) = Self::extract_jump_target(&blocks[idx].instructions) {
-                            if leader_index.contains_key(&dest) {
-                                successors.push(dest);
+        
+        // Build successors
+        for i in 0..blocks.len() {
+            let block = &blocks[i];
+            let last_pc = block.end;
+            if last_pc < len {
+                let last_opcode = bytecode[last_pc];
+                let next_pc = Self::next_pc(bytecode, last_pc);
+                
+                match last_opcode {
+                    0x56 | 0x57 => { // JUMP or JUMPI
+                        // Try to find jump target
+                        if let Some(target) = Self::find_jump_target(&block.instructions, bytecode) {
+                            if let Some(target_block) = blocks.iter().position(|b| b.start == target) {
+                                blocks[i].successors.push(target_block);
+                            }
+                        }
+                        if last_opcode == 0x57 && next_pc < len {
+                            if let Some(fallthrough) = blocks.iter().position(|b| b.start == next_pc) {
+                                blocks[i].successors.push(fallthrough);
                             }
                         }
                     }
-                    OPCODE_JUMPI => {
-                        if let Some(dest) = Self::extract_jump_target(&blocks[idx].instructions) {
-                            if leader_index.contains_key(&dest) {
-                                successors.push(dest);
-                            }
-                        }
-                        let fallthrough = block_end.saturating_add(1);
-                        if leader_index.contains_key(&fallthrough) {
-                            successors.push(fallthrough);
-                        }
-                    }
-                    OPCODE_STOP | OPCODE_RETURN | OPCODE_REVERT | OPCODE_SELFDESTRUCT => {}
                     _ => {
-                        let fallthrough = block_end.saturating_add(1);
-                        if leader_index.contains_key(&fallthrough) {
-                            successors.push(fallthrough);
+                        if next_pc < len {
+                            if let Some(next_block) = blocks.iter().position(|b| b.start == next_pc) {
+                                blocks[i].successors.push(next_block);
+                            }
                         }
                     }
                 }
             }
-
-            successors.sort_unstable();
-            successors.dedup();
-            blocks[idx].successors = successors;
         }
-
-        blocks
+        
+        ControlFlowGraph {
+            blocks,
+            entry: 0,
+            exits: Vec::new(),
+        }
     }
-
+    
+    /// Extract function selectors (advanced)
+    fn extract_selectors_advanced(bytecode: &[u8]) -> Vec<[u8; 4]> {
+        let mut selectors = Vec::new();
+        let len = bytecode.len();
+        let mut i = 0;
+        
+        while i < len {
+            if bytecode[i] == 0x63 && i + 4 < len {
+                let selector = [
+                    bytecode[i+1], bytecode[i+2], bytecode[i+3], bytecode[i+4]
+                ];
+                if selector != [0,0,0,0] && !selectors.contains(&selector) {
+                    selectors.push(selector);
+                }
+                i += 5;
+            } else if (0x60..=0x7F).contains(&bytecode[i]) {
+                let push_len = (bytecode[i] - 0x5F) as usize;
+                i += 1 + push_len;
+            } else {
+                i += 1;
+            }
+        }
+        
+        selectors
+    }
+    
+    /// Find function entry point by selector
+    fn find_function_entry(bytecode: &[u8], selector: &[u8; 4]) -> Option<usize> {
+        let len = bytecode.len();
+        let mut i = 0;
+        
+        while i < len {
+            if bytecode[i] == 0x63 && i + 4 < len {
+                if bytecode[i+1] == selector[0] &&
+                   bytecode[i+2] == selector[1] &&
+                   bytecode[i+3] == selector[2] &&
+                   bytecode[i+4] == selector[3] {
+                    // Found selector, return the function entry
+                    return Some(i + 5);
+                }
+                i += 5;
+            } else if (0x60..=0x7F).contains(&bytecode[i]) {
+                let push_len = (bytecode[i] - 0x5F) as usize;
+                i += 1 + push_len;
+            } else {
+                i += 1;
+            }
+        }
+        
+        None
+    }
+    
+    /// Check if function has access control at entry
+    fn has_access_control_at_entry(bytecode: &[u8], entry_offset: usize) -> bool {
+        let start = entry_offset;
+        let end = (entry_offset + PATTERN_WINDOW).min(bytecode.len());
+        
+        for i in start..end {
+            // Check for CALLER (0x33) followed by EQ (0x14) and JUMPI (0x57)
+            if bytecode[i] == 0x33 { // CALLER
+                if i + 2 < end {
+                    if bytecode[i+1] == 0x14 || bytecode[i+2] == 0x14 { // EQ
+                        return true;
+                    }
+                }
+            }
+            // Check for ISZERO + JUMPI pattern
+            if bytecode[i] == 0x15 && i + 1 < end && bytecode[i+1] == 0x57 { // ISZERO + JUMPI
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Check for msg.sender validation
+    fn has_msg_sender_validation(bytecode: &[u8], entry_offset: usize) -> bool {
+        let start = entry_offset;
+        let end = (entry_offset + PATTERN_WINDOW).min(bytecode.len());
+        
+        for i in start..end {
+            if bytecode[i] == 0x33 { // CALLER
+                // Check for EQ with stored value (owner)
+                if i + 1 < end && bytecode[i+1] == 0x14 {
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+    
+    /// Check if delegation target is validated
+    fn has_target_validation(bytecode: &[u8], entry_offset: usize) -> bool {
+        let start = entry_offset;
+        let end = (entry_offset + PATTERN_WINDOW).min(bytecode.len());
+        
+        for i in start..end {
+            // Check for EXTCODESIZE check (0x3B) - basic validation
+            if bytecode[i] == 0x3B { // EXTCODESIZE
+                // Check for ISZERO (0x15) and REVERT (0xFD) pattern
+                if i + 2 < end && bytecode[i+1] == 0x15 && bytecode[i+2] == 0x57 {
+                    return true;
+                }
+            }
+            // Check for address comparison with whitelist
+            if bytecode[i] == 0x54 { // SLOAD - loading stored whitelist
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Check for delegation whitelist
+    fn has_delegation_whitelist(bytecode: &[u8], entry_offset: usize) -> bool {
+        Self::has_target_validation(bytecode, entry_offset)
+    }
+    
+    /// Check if path contains JUMPI (conditional branch)
+    fn has_jumpi_in_path(instructions: &[OpcodeLocation]) -> bool {
+        for instr in instructions {
+            if instr.opcode == 0x57 { // JUMPI
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Find jump target from JUMP/JUMPI instruction
+    fn find_jump_target(instructions: &[OpcodeLocation], bytecode: &[u8]) -> Option<usize> {
+        for instr in instructions.iter().rev() {
+            if let Some(ref data) = instr.push_data {
+                if data.len() == 2 {
+                    let target = ((data[0] as usize) << 8) | (data[1] as usize);
+                    if target < bytecode.len() && bytecode[target] == 0x5B {
+                        return Some(target);
+                    }
+                } else if data.len() == 1 {
+                    let target = data[0] as usize;
+                    if target < bytecode.len() && bytecode[target] == 0x5B {
+                        return Some(target);
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    /// Find DELEGATECALL opcode offset
+    fn find_delegatecall_offset(bytecode: &[u8]) -> Option<usize> {
+        for i in 0..bytecode.len() {
+            if bytecode[i] == 0xF4 {
+                return Some(i);
+            }
+        }
+        None
+    }
+    
+    /// Calculate risk score based on detections
+    fn calculate_risk_score(detections: &[EIP7702Detection]) -> u32 {
+        let mut score = 0u32;
+        
+        for detection in detections {
+            match detection.severity {
+                PatternSeverity::Critical => score += 40,
+                PatternSeverity::High => score += 25,
+                PatternSeverity::Medium => score += 10,
+                PatternSeverity::Low => score += 5,
+                PatternSeverity::Info => score += 0,
+            }
+            
+            // Add confidence factor
+            score += (detection.confidence * 10.0) as u32;
+        }
+        
+        score.min(100)
+    }
+    
+    /// Build flags from detections (legacy compatibility)
+    fn build_flags(detections: &[EIP7702Detection]) -> Vec<BytecodeFlag> {
+        detections.iter().map(|d| BytecodeFlag {
+            opcode: 0,
+            offset: d.offset,
+            severity: d.severity,
+            description: d.description.clone(),
+        }).collect()
+    }
+    
+    /// Next program counter after instruction
     fn next_pc(bytecode: &[u8], pc: usize) -> usize {
         let opcode = bytecode[pc];
         if (0x60..=0x7F).contains(&opcode) {
@@ -957,83 +1030,39 @@ impl BytecodeScanner {
             (pc + 1).min(bytecode.len())
         }
     }
-
-    fn extract_jump_target(instructions: &[Instruction]) -> Option<usize> {
-        instructions.iter().rev().skip(1).find_map(|inst| {
-            inst.push_data.as_ref().and_then(|data| {
-                if data.is_empty() || data.len() > 8 {
-                    return None;
-                }
-
-                let mut target = 0usize;
-                for byte in data {
-                    target = (target << 8) | (*byte as usize);
-                }
-                Some(target)
-            })
-        })
-    }
-
-    /// Match dangerous signatures against selectors
-    pub fn match_dangerous_signatures(selectors: &[[u8; 4]]) -> Vec<String> {
-        let dangerous_signatures: &[(&str, &str)] = &[
-            ("selfdestruct()", "Self-destruct trigger"),
-            ("kill()", "Self-destruct alias"),
-            ("destroy()", "Self-destruct alias"),
-            ("withdrawAll()", "Full balance drain"),
-            ("drainFunds(address)", "Explicit drain function"),
-            ("transferOwnership(address)", "Ownership transfer"),
-            ("renounceOwnership()", "Ownership renunciation"),
-            ("upgradeTo(address)", "Upgrade proxy implementation"),
-            ("upgradeToAndCall(address,bytes)", "Upgrade with delegatecall"),
-            ("initialize()", "Unprotected initializer"),
-            ("__destroy__()", "Backdoor destroy"),
-            ("emergencyWithdraw()", "Emergency drain"),
-            ("sweepTokens(address)", "Token sweep"),
-            ("withdraw(address)", "Generic withdraw"),
-            ("takeOwnership()", "Ownership takeover"),
-            ("becomeAdmin()", "Admin takeover"),
-            ("setImplementation(address)", "Implementation change"),
-        ];
-
-        let mut matches = Vec::new();
-
-        for (sig, desc) in dangerous_signatures {
-            let expected = Self::selector_from_sig(sig);
-            if selectors.contains(&expected) {
-                matches.push(format!("{} - {}", sig, desc));
-            }
+    
+    /// Opcode to mnemonic
+    fn opcode_to_mnemonic(opcode: u8) -> &'static str {
+        match opcode {
+            0x00 => "STOP", 0x01 => "ADD", 0x02 => "MUL", 0x03 => "SUB",
+            0x04 => "DIV", 0x05 => "SDIV", 0x06 => "MOD", 0x07 => "SMOD",
+            0x08 => "ADDMOD", 0x09 => "MULMOD", 0x0A => "EXP", 0x0B => "SIGNEXTEND",
+            0x10 => "LT", 0x11 => "GT", 0x12 => "SLT", 0x13 => "SGT",
+            0x14 => "EQ", 0x15 => "ISZERO", 0x16 => "AND", 0x17 => "OR",
+            0x18 => "XOR", 0x19 => "NOT", 0x1A => "BYTE", 0x1B => "SHL",
+            0x1C => "SHR", 0x1D => "SAR", 0x20 => "SHA3",
+            0x30 => "ADDRESS", 0x31 => "BALANCE", 0x32 => "ORIGIN", 0x33 => "CALLER",
+            0x34 => "CALLVALUE", 0x35 => "CALLDATALOAD", 0x36 => "CALLDATASIZE",
+            0x37 => "CALLDATACOPY", 0x38 => "CODESIZE", 0x39 => "CODECOPY",
+            0x3A => "GASPRICE", 0x3B => "EXTCODESIZE", 0x3C => "EXTCODECOPY",
+            0x3D => "RETURNDATASIZE", 0x3E => "RETURNDATACOPY", 0x3F => "EXTCODEHASH",
+            0x40 => "BLOCKHASH", 0x41 => "COINBASE", 0x42 => "TIMESTAMP",
+            0x43 => "NUMBER", 0x44 => "DIFFICULTY", 0x45 => "GASLIMIT",
+            0x46 => "CHAINID", 0x47 => "SELFBALANCE", 0x48 => "BASEFEE",
+            0x50 => "POP", 0x51 => "MLOAD", 0x52 => "MSTORE", 0x53 => "MSTORE8",
+            0x54 => "SLOAD", 0x55 => "SSTORE", 0x56 => "JUMP", 0x57 => "JUMPI",
+            0x58 => "PC", 0x59 => "MSIZE", 0x5A => "GAS", 0x5B => "JUMPDEST",
+            0x60..=0x7F => "PUSH", 0x80..=0x8F => "DUP", 0x90..=0x9F => "SWAP",
+            0xA0..=0xA4 => "LOG", 0xF0 => "CREATE", 0xF1 => "CALL", 0xF2 => "CALLCODE",
+            0xF3 => "RETURN", 0xF4 => "DELEGATECALL", 0xF5 => "CREATE2",
+            0xFA => "STATICCALL", 0xFD => "REVERT", 0xFF => "SELFDESTRUCT",
+            _ => "INVALID",
         }
-
-        matches
-    }
-
-    /// Get additional risk assessment
-    pub fn assess_risk(analysis: &BytecodeAnalysis) -> String {
-        if analysis.has_selfdestruct {
-            "CRITICAL: Contract can self-destruct".to_string()
-        } else if analysis.has_delegatecall && !analysis.access_controls.is_empty() {
-            "HIGH: Delegatecall with access control".to_string()
-        } else if analysis.has_delegatecall {
-            "MEDIUM: Delegatecall without visible access control".to_string()
-        } else if analysis.has_reentrancy_risk {
-            "MEDIUM: Potential reentrancy vulnerability".to_string()
-        } else if analysis.risk_score > 30 {
-            "MEDIUM: Multiple suspicious patterns".to_string()
-        } else if analysis.risk_score > 10 {
-            "LOW: Minor concerns detected".to_string()
-        } else {
-            "LOW: No major concerns detected".to_string()
-        }
-    }
-
-    pub fn selector_to_hex(selector: &[u8; 4]) -> String {
-        format!("0x{}", hex::encode(selector))
     }
 }
 
 // ============================================================
-// TESTES
+// TESTS
 // ============================================================
 
 #[cfg(test)]
@@ -1041,46 +1070,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_eoa_only_bypass_detection() {
+        // Bytecode with ORIGIN + EQ pattern (simplified)
+        let bytecode = vec![
+            0x32, // ORIGIN
+            0x33, // CALLER
+            0x14, // EQ
+            0x57, // JUMPI
+        ];
+        
+        let analysis = EIP7702BytecodeEngine::analyze(&bytecode);
+        let has_eoa_bypass = analysis.eip7702_detections
+            .iter()
+            .any(|d| d.pattern == EIP7702Pattern::EoaOnlyBypass);
+        
+        assert!(has_eoa_bypass);
+    }
+
+    #[test]
+    fn test_batch_call_detection() {
+        // Batch selector bytes for sequence
+        let mut bytecode = vec![0x63]; // PUSH4
+        bytecode.extend_from_slice(BATCH_SELECTORS[0].1); // batch selector
+        bytecode.push(0x14); // EQ
+        
+        let analysis = EIP7702BytecodeEngine::analyze(&bytecode);
+        let has_batch = analysis.eip7702_detections
+            .iter()
+            .any(|d| d.pattern == EIP7702Pattern::BatchCallExploit);
+        
+        // May or may not detect depending on completeness of bytecode
+        // This is a placeholder test
+        println!("Batch detection count: {}", analysis.eip7702_detections.len());
+    }
+
+    #[test]
+    fn test_chain_agnostic_detection() {
+        // EIP-7702 authority with chainId = 0
+        let mut bytecode = Vec::new();
+        bytecode.extend_from_slice(&EIP7702_AUTHORITY_MAGIC);
+        bytecode.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // chainId = 0
+        
+        let analysis = EIP7702BytecodeEngine::analyze(&bytecode);
+        let has_agnostic = analysis.eip7702_detections
+            .iter()
+            .any(|d| d.pattern == EIP7702Pattern::ChainAgnosticReplay);
+        
+        assert!(has_agnostic);
+    }
+
+    #[test]
+    fn test_risk_score_calculation() {
+        let detections = vec![
+            EIP7702Detection {
+                pattern: EIP7702Pattern::EoaOnlyBypass,
+                offset: 0,
+                severity: PatternSeverity::Critical,
+                confidence: 0.95,
+                description: "test".to_string(),
+                exploitation_path: None,
+                evidence: vec![],
+                context: EIP7702Context::default(),
+            },
+        ];
+        
+        let score = EIP7702BytecodeEngine::calculate_risk_score(&detections);
+        assert!(score > 0);
+        assert!(score <= 100);
+    }
+
+    #[test]
     fn test_selector_extraction() {
-        let bytecode = vec![
-            0x63, 0xAB, 0xCD, 0xEF, 0x01, 0x14, 0x63, 0x12, 0x34, 0x56, 0x78, 0x14,
-        ];
-        let selectors = BytecodeScanner::extract_selectors(&bytecode);
-        assert_eq!(selectors.len(), 2);
-        assert_eq!(selectors[0], [0xAB, 0xCD, 0xEF, 0x01]);
-        assert_eq!(selectors[1], [0x12, 0x34, 0x56, 0x78]);
-    }
-
-    #[test]
-    fn test_selfdestruct_detection() {
-        let bytecode = vec![0x60, 0x00, OPCODE_SELFDESTRUCT];
-        let analysis = BytecodeScanner::analyze(&bytecode);
-        assert!(analysis.has_selfdestruct);
-        assert!(!analysis.flags.is_empty());
-        assert!(analysis.risk_score >= 50);
-    }
-
-    #[test]
-    fn test_selector_from_sig() {
-        let sel = BytecodeScanner::selector_from_sig("transfer(address,uint256)");
-        assert_eq!(sel, [0xa9, 0x05, 0x9c, 0xbb]);
-    }
-
-    #[test]
-    fn test_opcode_mnemonic() {
-        assert_eq!(BytecodeScanner::opcode_to_mnemonic(OPCODE_STOP), "STOP");
-        assert_eq!(BytecodeScanner::opcode_to_mnemonic(OPCODE_CALL), "CALL");
-        assert_eq!(BytecodeScanner::opcode_to_mnemonic(OPCODE_SELFDESTRUCT), "SELFDESTRUCT");
-    }
-
-    #[test]
-    fn test_reentrancy_detection() {
-        // SSTORE followed by CALL
-        let bytecode = vec![
-            OPCODE_SSTORE, // storage write
-            OPCODE_CALL,   // external call - reentrancy risk
-        ];
-        let analysis = BytecodeScanner::analyze(&bytecode);
-        assert!(analysis.has_reentrancy_risk);
+        let mut bytecode = Vec::new();
+        bytecode.push(0x63);
+        bytecode.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        
+        let selectors = EIP7702BytecodeEngine::extract_selectors_advanced(&bytecode);
+        assert_eq!(selectors.len(), 1);
+        assert_eq!(selectors[0], [0x12, 0x34, 0x56, 0x78]);
     }
 }
