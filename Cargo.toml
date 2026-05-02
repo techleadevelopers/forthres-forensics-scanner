@@ -3,6 +3,10 @@ name = "forthres"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+web-audit = []
+
 [lib]
 name = "ghost_scanner"
 path = "src/lib.rs"
@@ -18,6 +22,7 @@ path = "src/bin/hexora-verify.rs"
 [[bin]]
 name = "forthres-web-audit"
 path = "src/bin/forthres-web-audit.rs"
+required-features = ["web-audit"]
 
 [dependencies]
 # Async runtime
