@@ -1321,6 +1321,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "forthres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "colored",
+ "dashmap",
+ "dotenv",
+ "ethers",
+ "fastrand",
+ "futures-util",
+ "hex",
+ "lru",
+ "num-bigint",
+ "num-traits",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha3",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid 1.23.0",
+]
+
+[[package]]
 name = "fs2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1502,39 +1536,6 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
-]
-
-[[package]]
-name = "ghost-scanner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "colored",
- "dashmap",
- "dotenv",
- "ethers",
- "fastrand",
- "futures-util",
- "hex",
- "lru",
- "num-bigint",
- "num-traits",
- "rand 0.8.5",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha3",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite 0.24.0",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid 1.23.0",
 ]
 
 [[package]]
