@@ -9,6 +9,7 @@ pub mod reporting;
 pub mod risk;
 pub mod service;
 pub mod verify;
+#[cfg(feature = "web-audit")]
 pub mod web_audit;
 
 pub use analysis as offensive;
