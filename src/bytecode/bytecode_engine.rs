@@ -327,10 +327,10 @@ impl EIP7702BytecodeEngine {
                 } else {
                     false
                 };
-                let is_dangerous = BATCH_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
-                    || DELEGATION_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
-                    || UPGRADE_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
-                    || ADMIN_SELECTORS.iter().any(|(_, candidate)| candidate == selector);
+                let is_dangerous = BATCH_SELECTORS.iter().any(|(_, candidate)| *candidate == selector)
+                    || DELEGATION_SELECTORS.iter().any(|(_, candidate)| *candidate == selector)
+                    || UPGRADE_SELECTORS.iter().any(|(_, candidate)| *candidate == selector)
+                    || ADMIN_SELECTORS.iter().any(|(_, candidate)| *candidate == selector);
 
                 FunctionInfo {
                     selector: *selector,
