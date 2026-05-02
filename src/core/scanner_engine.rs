@@ -1664,7 +1664,7 @@ fn score_basic_block_for_replay(block: &crate::bytecode::BasicBlockInfo) -> u32 
     if block
         .instructions
         .iter()
-        .any(|inst| matches!(inst.mnemonic, "DELEGATECALL" | "CALLCODE"))
+        .any(|inst| inst.mnemonic == "DELEGATECALL" || inst.mnemonic == "CALLCODE")
     {
         score += 12;
     }
@@ -1706,7 +1706,7 @@ fn opcode_capability_summary(analysis: &BytecodeAnalysis) -> String {
     let byte_len = analysis.bytecode.len();
     let severity = analysis
         .top_severity()
-        .map(std::string::ToString::to_string)
+        .map(|severity| severity.to_string())
         .unwrap_or_else(|| "NONE".to_string());
 
     if capabilities.is_empty() {
