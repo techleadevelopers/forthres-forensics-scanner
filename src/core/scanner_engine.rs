@@ -9,16 +9,21 @@ use serde_json::{json, Value};
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
-use crate::bytecode::{BytecodeAnalysis, BytecodeScanner};
+use crate::bytecode::{
+    BytecodeAnalysis, BytecodeScanner, EIP7702BytecodeEngine, EIP7702Detection,
+    EIP7702Pattern, PatternSeverity,
+};
 use crate::config::ScannerConfig;
 use crate::forensics::ForensicsEngine;
 use crate::load_balancer::{LoadBalancer, WsConnectionRequest};
 use crate::offensive::{OffensiveConfig, OffensiveEngine};
+use crate::path::{DelegationContext, PathAnalysisEngine};
 use crate::reporter::{
     BehavioralKind, BehavioralRiskReport, BytecodeConfidenceReport, BytecodeSignalReport,
     DecisionTraceReport, EndpointHealthSnapshot, EvidenceReport, ForkValidationReport, ProxyReport,
     ScannerStatusSnapshot, Severity, ValueFlowReport, VulnerabilityKind, VulnerabilityReport, VulnerabilityReporter,
 };
+use crate::risk::ProbabilisticRiskEngine;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScanMode {
@@ -226,6 +231,12 @@ struct BehavioralInference {
     kind: BehavioralKind,
     score: f64,
     rationale: &'static str,
+}
+
+struct EIP7702RiskAssessment {
+    critical_combined_risk: bool,
+    exploitation_risk: f64,
+    potential_loss_eth: f64,
 }
 
 struct RpcClient {
@@ -553,6 +564,208 @@ if let Some(owner) = &real_owner {
     Ok((suspicious, delta))
 }
 
+async fn detect_eip7702_vulnerabilities(
+    bytecode: &[u8],
+    contract_address: &str,
+    rpc: &RpcClient,
+    emit: &mut impl FnMut(ScanEvent),
+) -> Result<Vec<EIP7702Detection>> {
+    let mut all_detections = Vec::new();
+
+    emit(log_event(
+        "Iniciando analise EIP-7702 (maximo nivel)".to_string(),
+        "info",
+    ));
+
+    let analysis = EIP7702BytecodeEngine::analyze(bytecode);
+
+    if !analysis.eip7702_detections.is_empty() {
+        emit(log_event(
+            format!(
+                "EIP-7702: {} padroes vulneraveis detectados",
+                analysis.eip7702_detections.len()
+            ),
+            "warn",
+        ));
+
+        for detection in &analysis.eip7702_detections {
+            emit(log_event(
+                format!(
+                    "  -> {} [{}] confidence={:.2}",
+                    detection.pattern,
+                    detection.severity,
+                    detection.confidence
+                ),
+                match detection.severity {
+                    PatternSeverity::Critical => "error",
+                    PatternSeverity::High => "warn",
+                    _ => "info",
+                },
+            ));
+
+            for evidence in &detection.evidence {
+                emit(log_event(format!("      - {}", evidence), "info"));
+            }
+        }
+
+        all_detections.extend(analysis.eip7702_detections);
+    }
+
+    emit(log_event(
+        "Verificando autorizacoes EIP-7702 on-chain".to_string(),
+        "info",
+    ));
+
+    match check_eip7702_authorizations(rpc, contract_address).await {
+        Ok(auth_detections) => {
+            if !auth_detections.is_empty() {
+                emit(log_event(
+                    format!(
+                        "{} autorizacoes EIP-7702 suspeitas detectadas",
+                        auth_detections.len()
+                    ),
+                    "warn",
+                ));
+                all_detections.extend(auth_detections);
+            } else {
+                emit(log_event(
+                    "Nenhuma autorizacao EIP-7702 suspeita encontrada".to_string(),
+                    "info",
+                ));
+            }
+        }
+        Err(e) => {
+            emit(log_event(
+                format!("Falha na verificacao de autorizacoes: {}", e),
+                "warn",
+            ));
+        }
+    }
+
+    let risk_assessment = assess_eip7702_risk_combination(&all_detections);
+
+    if risk_assessment.critical_combined_risk {
+        emit(log_event(
+            "ALERTA CRITICO: combinacao de vulnerabilidades EIP-7702 detectada".to_string(),
+            "error",
+        ));
+        emit(log_event(
+            format!(
+                "  -> risco de exploracao: {:.1}%",
+                risk_assessment.exploitation_risk * 100.0
+            ),
+            "error",
+        ));
+        emit(log_event(
+            format!(
+                "  -> valor potencial em risco: {:.4} ETH",
+                risk_assessment.potential_loss_eth
+            ),
+            "error",
+        ));
+    }
+
+    emit(log_event(
+        format!(
+            "Analise EIP-7702 concluida: {} vulnerabilidades encontradas",
+            all_detections.len()
+        ),
+        "info",
+    ));
+
+    Ok(all_detections)
+}
+
+async fn check_eip7702_authorizations(
+    rpc: &RpcClient,
+    contract_address: &str,
+) -> Result<Vec<EIP7702Detection>> {
+    let mut detections = Vec::new();
+
+    let _block_number = get_current_block_number(rpc).await?;
+
+    let delegation_slots = [
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0xef01000000000000000000000000000000000000000000000000000000000000",
+    ];
+
+    for slot in delegation_slots {
+        if let Ok((value, _)) = rpc.get_storage_at(contract_address, slot).await {
+            if value != "0x0000000000000000000000000000000000000000000000000000000000000000" {
+                detections.push(EIP7702Detection {
+                    pattern: EIP7702Pattern::UnvalidatedDelegation,
+                    offset: 0,
+                    severity: PatternSeverity::High,
+                    confidence: 0.65,
+                    description: format!(
+                        "Possivel delegacao EIP-7702 ativa detectada no storage slot {}",
+                        slot
+                    ),
+                    exploitation_path: Some(
+                        "Verifique se esta delegacao e esperada. Se nao for, pode indicar comprometimento."
+                            .to_string(),
+                    ),
+                    evidence: vec![
+                        format!("Storage slot {} contem valor nao-zero: {}", slot, &value[..20]),
+                        "EIP-7702 permite execucao delegada".to_string(),
+                        "Contrato pode estar delegando para codigo arbitrario".to_string(),
+                    ],
+                    context: Default::default(),
+                });
+            }
+        }
+    }
+
+    Ok(detections)
+}
+
+fn assess_eip7702_risk_combination(detections: &[EIP7702Detection]) -> EIP7702RiskAssessment {
+    let mut risk_score = 0.0;
+
+    for detection in detections {
+        match detection.pattern {
+            EIP7702Pattern::BatchCallExploit => risk_score += 0.35,
+            EIP7702Pattern::EoaOnlyBypass => risk_score += 0.30,
+            EIP7702Pattern::UnvalidatedDelegation => risk_score += 0.25,
+            EIP7702Pattern::AdminDelegationAbuse => risk_score += 0.40,
+            EIP7702Pattern::DelegatecallBatchRouter => risk_score += 0.35,
+            _ => risk_score += 0.10,
+        }
+    }
+
+    let has_batch = detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::BatchCallExploit));
+    let has_delegation = detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::UnvalidatedDelegation));
+    let has_admin = detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::AdminDelegationAbuse));
+
+    let critical_combined_risk = (has_batch && has_delegation) || (has_admin && has_delegation);
+
+    if critical_combined_risk {
+        risk_score += 0.25;
+    }
+
+    risk_score = risk_score.min(0.95);
+
+    let potential_loss_eth = if risk_score > 0.7 {
+        100.0
+    } else if risk_score > 0.4 {
+        10.0
+    } else {
+        0.0
+    };
+
+    EIP7702RiskAssessment {
+        critical_combined_risk,
+        exploitation_risk: risk_score,
+        potential_loss_eth,
+    }
+}
+
 pub async fn scan_contract(
     config: &ScannerConfig,
     request: ScanRequest,
@@ -642,6 +855,139 @@ pub async fn scan_contract(
         }
     }
     emit(step_event("opcodes", "Opcode analysis", "done"));
+
+    emit(step_event("eip7702", "EIP-7702 vulnerability analysis", "running"));
+    let eip7702_detections = match detect_eip7702_vulnerabilities(
+        &bytecode,
+        &request.contract_address,
+        &rpc,
+        &mut emit,
+    )
+    .await
+    {
+        Ok(detections) => detections,
+        Err(e) => {
+            emit(log_event(format!("EIP-7702 analysis failed: {}", e), "warn"));
+            Vec::new()
+        }
+    };
+
+    let has_eip7702_critical = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.severity, PatternSeverity::Critical));
+    let has_eip7702_batch = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::BatchCallExploit));
+    let has_eip7702_delegation = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::UnvalidatedDelegation));
+    let has_eip7702_eoa_bypass = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::EoaOnlyBypass));
+    let has_eip7702_admin = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::AdminDelegationAbuse));
+    let mut eip7702_paths = Vec::new();
+    let mut eip7702_overall_risk = 0.0;
+
+    if has_eip7702_critical {
+        emit(log_event(
+            "EIP-7702: vulnerabilidade CRITICA detectada".to_string(),
+            "error",
+        ));
+
+        if has_eip7702_batch {
+            emit(log_event(
+                "  -> Batch call unrestricted: atacante pode drenar fundos via delegacao".to_string(),
+                "error",
+            ));
+            emit(log_event(
+                "  -> Exploit real: QNT reserve pool (~54.93 ETH)".to_string(),
+                "error",
+            ));
+        }
+
+        if has_eip7702_eoa_bypass {
+            emit(log_event(
+                "  -> EOA-only bypass: require(msg.sender == tx.origin) nao e mais seguro".to_string(),
+                "error",
+            ));
+            emit(log_event(
+                "  -> Exploit real: Flare FAssets protocol".to_string(),
+                "error",
+            ));
+        }
+
+        if has_eip7702_delegation {
+            emit(log_event(
+                "  -> Unvalidated delegation: qualquer contrato pode ser delegado".to_string(),
+                "error",
+            ));
+            emit(log_event(
+                "  -> Estatistica: grande concentracao de autorizacoes maliciosas observadas".to_string(),
+                "error",
+            ));
+        }
+    }
+
+    if !eip7702_detections.is_empty() {
+        let eip7702_analysis = EIP7702BytecodeEngine::analyze(&bytecode);
+        let delegation_context = DelegationContext {
+            is_active: has_eip7702_delegation,
+            delegated_from: None,
+            delegated_code: None,
+            delegation_pc: 0,
+            can_execute_arbitrary: has_eip7702_delegation,
+            batch_available: has_eip7702_batch,
+            admin_privileges: has_eip7702_admin,
+        };
+
+        eip7702_paths = PathAnalysisEngine::analyze_all_paths(
+            &eip7702_analysis.cfgraph,
+            &eip7702_detections,
+            &delegation_context,
+        );
+
+        emit(log_event(
+            format!(
+                "EIP-7702 path engine encontrou {} execution paths",
+                eip7702_paths.len()
+            ),
+            if eip7702_paths.is_empty() { "info" } else { "warn" },
+        ));
+
+        let contract_balance_eth = forensics
+            .get_balance(&request.contract_address)
+            .await
+            .ok()
+            .map(|value| value as f64 / 1e18);
+        let mut risk_engine = ProbabilisticRiskEngine::new();
+        let risk_assessment = risk_engine.assess_risk(
+            &eip7702_detections,
+            &eip7702_paths,
+            contract_balance_eth,
+            None,
+        );
+        eip7702_overall_risk = risk_assessment.overall_risk_score;
+
+        emit(log_event(
+            format!(
+                "EIP-7702 probabilistic risk: score={:.1}/100 exploitProb={:.2}% expectedLoss={:.4} ETH",
+                risk_assessment.overall_risk_score,
+                risk_assessment.exploitation_probability * 100.0,
+                risk_assessment.expected_loss_eth
+            ),
+            if risk_assessment.overall_risk_score >= 80.0 {
+                "error"
+            } else if risk_assessment.overall_risk_score >= 60.0 {
+                "warn"
+            } else {
+                "info"
+            },
+        ));
+    }
+
+    emit(step_event("eip7702", "EIP-7702 vulnerability analysis", "done"));
 
     emit(step_event("selectors", "ABI selector extraction", "running"));
     let selectors = collect_selectors(&analysis);
@@ -765,7 +1111,7 @@ pub async fn scan_contract(
     let should_run_fork = match request.fork {
         ForkMode::Force => true,
         ForkMode::Off => false,
-        ForkMode::Auto => analysis.has_delegatecall || provisional_score >= 60,
+        ForkMode::Auto => analysis.has_delegatecall || provisional_score >= 60 || has_eip7702_critical || eip7702_overall_risk >= 70.0,
     };
 
     let mut fork_validated = false;
@@ -979,6 +1325,9 @@ pub async fn scan_contract(
         fork_validated,
         !exploit_paths.is_empty(),
         has_access_control,
+        &eip7702_detections,
+        eip7702_paths.len(),
+        eip7702_overall_risk,
     );
     let resolution = resolve_classification(
         base_confidence,
@@ -992,6 +1341,9 @@ pub async fn scan_contract(
         has_only_admin_functions(&dangerous_matches),
         looks_like_standard_token(&selectors),
         looks_like_known_legit_contract(&request.contract_address, &selectors),
+        &eip7702_detections,
+        eip7702_paths.len(),
+        eip7702_overall_risk,
     );
     let simulation_only = request.simulation && !fork_validated;
     let value_flow = infer_value_flow(&selectors, proxy.is_proxy());
@@ -1017,6 +1369,9 @@ pub async fn scan_contract(
         coverage_alignment_score,
         value_flow,
         &proxy,
+        &eip7702_detections,
+        eip7702_paths.len(),
+        eip7702_overall_risk,
     );
 
     let report = VulnerabilityReport {
@@ -1496,6 +1851,9 @@ fn build_decision_traces(
     coverage_alignment_score: f64,
     value_flow: ValueFlowHeuristics,
     proxy: &ProxyMetadata,
+    eip7702_detections: &[EIP7702Detection],
+    eip7702_path_count: usize,
+    eip7702_overall_risk: f64,
 ) -> Vec<DecisionTraceReport> {
     let mut traces = vec![
         DecisionTraceReport {
@@ -1553,6 +1911,25 @@ fn build_decision_traces(
             weight: (coverage_alignment_score * 100.0).round() as i32,
         },
         DecisionTraceReport {
+            title: "eip7702".to_string(),
+            detail: if eip7702_detections.is_empty() {
+                "No EIP-7702 structural or on-chain delegation issues detected.".to_string()
+            } else {
+                format!(
+                    "{} EIP-7702 detections, {} execution paths, risk {:.1}/100: {}",
+                    eip7702_detections.len(),
+                    eip7702_path_count,
+                    eip7702_overall_risk,
+                    eip7702_detections
+                        .iter()
+                        .map(|d| format!("{}[{:.2}]", d.pattern, d.confidence))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            },
+            weight: ((eip7702_detections.len() as i32) * 12) + eip7702_path_count as i32 * 4,
+        },
+        DecisionTraceReport {
             title: "resolution".to_string(),
             detail: format!(
                 "severity={} kind={} confidence={} probability={:.2}% rav={:.4}ETH",
@@ -1577,8 +1954,37 @@ fn calculate_confidence(
     fork_validated: bool,
     has_exploit_path: bool,
     has_access_control: bool,
+    eip7702_detections: &[EIP7702Detection],
+    eip7702_path_count: usize,
+    eip7702_overall_risk: f64,
 ) -> u32 {
     let mut score = analysis.risk_score + dangerous_match_count as u32 * 10;
+
+    let eip7702_critical_count = eip7702_detections
+        .iter()
+        .filter(|d| matches!(d.severity, PatternSeverity::Critical))
+        .count();
+    let eip7702_high_count = eip7702_detections
+        .iter()
+        .filter(|d| matches!(d.severity, PatternSeverity::High))
+        .count();
+
+    score += (eip7702_critical_count * 15) as u32;
+    score += (eip7702_high_count * 8) as u32;
+
+    let has_batch = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::BatchCallExploit));
+    let has_delegation = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.pattern, EIP7702Pattern::UnvalidatedDelegation));
+
+    if has_batch && has_delegation {
+        score += 25;
+    }
+
+    score += (eip7702_path_count.min(3) as u32) * 5;
+    score += ((eip7702_overall_risk / 10.0).round() as u32).min(15);
 
     if simulation.all_reverted() {
         score = score.saturating_sub(15);
@@ -1611,6 +2017,9 @@ fn resolve_classification(
     has_only_admin_functions: bool,
     looks_like_standard_token: bool,
     looks_like_known_legit_contract: bool,
+    eip7702_detections: &[EIP7702Detection],
+    eip7702_path_count: usize,
+    eip7702_overall_risk: f64,
 ) -> Resolution {
     const CONFIRMED_MIN_PROBABILITY: f64 = 0.20;
     const CONFIRMED_MIN_RISK_ADJUSTED_VALUE_ETH: f64 = 0.01;
@@ -1620,12 +2029,23 @@ fn resolve_classification(
     let meets_confirmed_thresholds = has_exploit_path
         && exploitation_probability >= CONFIRMED_MIN_PROBABILITY
         && risk_adjusted_value >= CONFIRMED_MIN_RISK_ADJUSTED_VALUE_ETH;
+    let has_eip7702_critical = eip7702_detections
+        .iter()
+        .any(|d| matches!(d.severity, PatternSeverity::Critical));
 
     if fork_validated && meets_confirmed_thresholds {
         return Resolution {
             severity: Severity::Critical,
             kind: VulnerabilityKind::ExploitConfirmed,
             confidence_score: base_confidence.max(95),
+        };
+    }
+
+    if has_eip7702_critical && (!has_exploit_path || eip7702_path_count > 0 || eip7702_overall_risk >= 70.0) {
+        return Resolution {
+            severity: Severity::High,
+            kind: VulnerabilityKind::HighRiskPattern,
+            confidence_score: base_confidence.max(75),
         };
     }
 
@@ -1861,6 +2281,13 @@ async fn fetch_chain_id(rpc: &RpcClient) -> Result<u64> {
     let stripped = chain_id_hex.trim_start_matches("0x");
     u64::from_str_radix(stripped, 16)
         .with_context(|| format!("failed to parse eth_chainId result: {chain_id_hex}"))
+}
+
+async fn get_current_block_number(rpc: &RpcClient) -> Result<u64> {
+    let (block_hex, _) = rpc.call::<String>("eth_blockNumber", json!([])).await?;
+    let stripped = block_hex.trim_start_matches("0x");
+    u64::from_str_radix(stripped, 16)
+        .with_context(|| format!("failed to parse block number: {block_hex}"))
 }
 
 async fn read_eip1967_address(
