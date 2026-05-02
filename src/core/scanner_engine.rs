@@ -720,7 +720,7 @@ async fn check_eip7702_authorizations(
 }
 
 fn assess_eip7702_risk_combination(detections: &[EIP7702Detection]) -> EIP7702RiskAssessment {
-    let mut risk_score = 0.0;
+    let mut risk_score: f64 = 0.0;
 
     for detection in detections {
         match detection.pattern {
@@ -1107,6 +1107,9 @@ pub async fn scan_contract(
         false,
         false,
         simulation.all_reverted() || proxy.has_admin_control(),
+        &eip7702_detections,
+        eip7702_paths.len(),
+        eip7702_overall_risk,
     );
     let should_run_fork = match request.fork {
         ForkMode::Force => true,
