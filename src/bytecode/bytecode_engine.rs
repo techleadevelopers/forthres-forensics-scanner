@@ -37,7 +37,7 @@ const PATTERN_WINDOW: usize = 256;
 // EIP-7702 PATTERN TYPES
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EIP7702Pattern {
     /// tx.origin + EQ + JUMPI pattern - broken EOA assumption
     EoaOnlyBypass,
@@ -201,6 +201,16 @@ pub struct BasicBlock {
     pub is_entry: bool,
 }
 
+pub type BasicBlockInfo = BasicBlock;
+
+#[derive(Debug, Clone)]
+pub struct FunctionInfo {
+    pub selector: [u8; 4],
+    pub offset: usize,
+    pub has_access_control: bool,
+    pub is_dangerous: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
     pub blocks: Vec<BasicBlock>,
@@ -212,10 +222,42 @@ pub struct ControlFlowGraph {
 pub struct BytecodeAnalysis {
     pub bytecode: Vec<u8>,
     pub selectors: Vec<[u8; 4]>,
+    pub function_selectors: Vec<[u8; 4]>,
     pub cfgraph: ControlFlowGraph,
+    pub basic_blocks: Vec<BasicBlock>,
+    pub dispatcher_targets: usize,
     pub eip7702_detections: Vec<EIP7702Detection>,
     pub flags: Vec<BytecodeFlag>,
+    pub functions: Vec<FunctionInfo>,
+    pub has_delegatecall: bool,
+    pub has_reentrancy_risk: bool,
+    pub has_upgrade_surface: bool,
+    pub has_admin_surface: bool,
+    pub has_fallback: bool,
+    pub has_receive: bool,
+    pub has_selfdestruct: bool,
+    pub has_callcode: bool,
+    pub has_create2: bool,
     pub risk_score: u32,
+}
+
+impl BytecodeAnalysis {
+    pub fn get_function_by_selector(&self, selector: &[u8; 4]) -> Option<&FunctionInfo> {
+        self.functions.iter().find(|function| &function.selector == selector)
+    }
+
+    pub fn top_severity(&self) -> Option<PatternSeverity> {
+        self.flags
+            .iter()
+            .map(|flag| flag.severity)
+            .max_by_key(|severity| match severity {
+                PatternSeverity::Critical => 5,
+                PatternSeverity::High => 4,
+                PatternSeverity::Medium => 3,
+                PatternSeverity::Low => 2,
+                PatternSeverity::Info => 1,
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +273,8 @@ pub struct BytecodeFlag {
 // ============================================================
 
 pub struct EIP7702BytecodeEngine;
+
+pub type BytecodeScanner = EIP7702BytecodeEngine;
 
 impl EIP7702BytecodeEngine {
     // ============================================================
@@ -256,7 +300,12 @@ impl EIP7702BytecodeEngine {
         detections.extend(Self::detect_batch_call_exploit(bytecode, &selectors, &cfgraph, &mut context));
         detections.extend(Self::detect_unvalidated_delegation(bytecode, &selectors, &cfgraph, &mut context));
         detections.extend(Self::detect_chain_agnostic_replay(bytecode, &mut context));
-        detections.extend(Self::detect_admin_delegation_abuse(&selectors, &context, &mut context));
+        let context_snapshot = context.clone();
+        detections.extend(Self::detect_admin_delegation_abuse(
+            &selectors,
+            &context_snapshot,
+            &mut context,
+        ));
         detections.extend(Self::detect_delegatecall_batch_router(bytecode, &selectors, &cfgraph, &mut context));
         detections.extend(Self::detect_upgrade_delegate_pattern(&selectors, &context));
         
@@ -266,12 +315,55 @@ impl EIP7702BytecodeEngine {
         // Build flags (legacy compatibility)
         let flags = Self::build_flags(&detections);
         
+        let has_delegatecall = context.has_delegatecall;
+        let has_upgrade_surface = context.has_upgrade_selector;
+        let has_admin_surface = context.has_admin_selector;
+        let functions = selectors
+            .iter()
+            .map(|selector| {
+                let offset = Self::find_function_entry(bytecode, selector).unwrap_or(0);
+                let has_access_control = if offset > 0 {
+                    Self::has_access_control_at_entry(bytecode, offset)
+                } else {
+                    false
+                };
+                let is_dangerous = BATCH_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
+                    || DELEGATION_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
+                    || UPGRADE_SELECTORS.iter().any(|(_, candidate)| candidate == selector)
+                    || ADMIN_SELECTORS.iter().any(|(_, candidate)| candidate == selector);
+
+                FunctionInfo {
+                    selector: *selector,
+                    offset,
+                    has_access_control,
+                    is_dangerous,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let has_selfdestruct = bytecode.contains(&0xff);
+        let has_callcode = bytecode.contains(&0xf2);
+        let has_create2 = bytecode.contains(&0xf5);
+
         BytecodeAnalysis {
             bytecode: bytecode.to_vec(),
-            selectors,
+            selectors: selectors.clone(),
+            function_selectors: selectors,
+            basic_blocks: cfgraph.blocks.clone(),
+            dispatcher_targets: cfgraph.blocks.len(),
             cfgraph,
             eip7702_detections: detections,
             flags,
+            functions,
+            has_delegatecall,
+            has_reentrancy_risk: false,
+            has_upgrade_surface,
+            has_admin_surface,
+            has_fallback: false,
+            has_receive: false,
+            has_selfdestruct,
+            has_callcode,
+            has_create2,
             risk_score,
         }
     }
@@ -832,7 +924,7 @@ impl EIP7702BytecodeEngine {
     }
     
     /// Extract function selectors (advanced)
-    fn extract_selectors_advanced(bytecode: &[u8]) -> Vec<[u8; 4]> {
+    pub fn extract_selectors_advanced(bytecode: &[u8]) -> Vec<[u8; 4]> {
         let mut selectors = Vec::new();
         let len = bytecode.len();
         let mut i = 0;
@@ -1032,7 +1124,7 @@ impl EIP7702BytecodeEngine {
     }
     
     /// Opcode to mnemonic
-    fn opcode_to_mnemonic(opcode: u8) -> &'static str {
+    pub fn opcode_to_mnemonic(opcode: u8) -> &'static str {
         match opcode {
             0x00 => "STOP", 0x01 => "ADD", 0x02 => "MUL", 0x03 => "SUB",
             0x04 => "DIV", 0x05 => "SDIV", 0x06 => "MOD", 0x07 => "SMOD",
@@ -1058,6 +1150,35 @@ impl EIP7702BytecodeEngine {
             0xFA => "STATICCALL", 0xFD => "REVERT", 0xFF => "SELFDESTRUCT",
             _ => "INVALID",
         }
+    }
+
+    pub fn selector_to_hex(selector: &[u8; 4]) -> String {
+        format!(
+            "0x{:02x}{:02x}{:02x}{:02x}",
+            selector[0], selector[1], selector[2], selector[3]
+        )
+    }
+
+    pub fn decode_hex(value: &str) -> Option<Vec<u8>> {
+        let raw = value.strip_prefix("0x").unwrap_or(value);
+        hex::decode(raw).ok()
+    }
+
+    pub fn match_dangerous_signatures(selectors: &[[u8; 4]]) -> Vec<String> {
+        let mut matches = Vec::new();
+
+        for (name, selector) in BATCH_SELECTORS
+            .iter()
+            .chain(DELEGATION_SELECTORS.iter())
+            .chain(UPGRADE_SELECTORS.iter())
+            .chain(ADMIN_SELECTORS.iter())
+        {
+            if selectors.contains(selector) {
+                matches.push(format!("{} ({})", name, Self::selector_to_hex(selector)));
+            }
+        }
+
+        matches
     }
 }
 
