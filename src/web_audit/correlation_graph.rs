@@ -278,4 +278,149 @@ impl CorrelationGraph {
         }
     }
     
-    pub fn add_hint(&mut self, hint: &str, metadata: HashMap<String, String>)
+    pub fn add_hint(&mut self, hint: &str, metadata: HashMap<String, String>) {
+        let category = infer_category(hint);
+        let timestamp = current_timestamp();
+
+        let node = CorrelationNode {
+            id: hint.to_string(),
+            name: hint.to_string(),
+            category,
+            confidence: 1.0,
+            severity: 1.0,
+            timestamp,
+            metadata,
+            edges: Vec::new(),
+        };
+
+        self.nodes.insert(hint.to_string(), node);
+        self.node_index
+            .entry(category_key(category).to_string())
+            .or_default()
+            .insert(hint.to_string());
+
+        self.rebuild_edges();
+    }
+
+    pub fn calculate_multiplier(&self, hints: &HashSet<String>) -> f64 {
+        if hints.is_empty() {
+            return 1.0;
+        }
+
+        let mut multiplier = 1.0;
+        for rule in &self.rules {
+            if rule.requires.iter().all(|required| hints.contains(required)) {
+                multiplier += rule.bonus;
+            }
+        }
+
+        multiplier
+    }
+
+    fn rebuild_edges(&mut self) {
+        self.edges.clear();
+        self.rules_applied.clear();
+        self.total_weight = 0.0;
+
+        let available_hints = self.nodes.keys().cloned().collect::<HashSet<_>>();
+        let timestamp = current_timestamp();
+        let mut generated_edges = Vec::new();
+
+        for rule in &self.rules {
+            if !rule.requires.iter().all(|required| available_hints.contains(required)) {
+                continue;
+            }
+
+            let required = rule.requires.iter().cloned().collect::<Vec<_>>();
+            for pair in required.windows(2) {
+                if let [source_id, target_id] = pair {
+                    generated_edges.push(CorrelationEdge {
+                        source_id: source_id.clone(),
+                        target_id: target_id.clone(),
+                        rule: rule.clone(),
+                        strength: rule.weight,
+                        discovered_at: timestamp,
+                    });
+                }
+            }
+
+            self.rules_applied.insert(rule.name.clone(), 1);
+            self.total_weight += rule.weight;
+        }
+
+        for edge in &generated_edges {
+            if let Some(source) = self.nodes.get_mut(&edge.source_id) {
+                source.edges.push(edge.clone());
+            }
+        }
+
+        self.edges = generated_edges;
+    }
+}
+
+fn infer_category(hint: &str) -> CorrelationCategory {
+    let normalized = hint.to_ascii_lowercase();
+
+    if normalized.contains("cloud")
+        || normalized.contains("aws")
+        || normalized.contains("gcp")
+        || normalized.contains("azure")
+        || normalized.contains("iam")
+    {
+        CorrelationCategory::CloudLeakage
+    } else if normalized.contains("admin")
+        || normalized.contains("jwt")
+        || normalized.contains("session")
+        || normalized.contains("auth")
+    {
+        CorrelationCategory::PrivilegeEscalation
+    } else if normalized.contains("db")
+        || normalized.contains("database")
+        || normalized.contains("pii")
+        || normalized.contains("idor")
+        || normalized.contains("sqli")
+    {
+        CorrelationCategory::DataExfiltration
+    } else if normalized.contains("ssrf")
+        || normalized.contains("redis")
+        || normalized.contains("docker")
+        || normalized.contains("internal")
+    {
+        CorrelationCategory::LateralMovement
+    } else if normalized.contains("coupon")
+        || normalized.contains("price")
+        || normalized.contains("checkout")
+        || normalized.contains("order")
+    {
+        CorrelationCategory::FinancialFraud
+    } else if normalized.contains("graphql") || normalized.contains("token_forge") {
+        CorrelationCategory::AuthBypass
+    } else if normalized.contains("client")
+        || normalized.contains("dom")
+        || normalized.contains("xss")
+    {
+        CorrelationCategory::ClientSide
+    } else {
+        CorrelationCategory::InfrastructurePivot
+    }
+}
+
+fn category_key(category: CorrelationCategory) -> &'static str {
+    match category {
+        CorrelationCategory::CloudLeakage => "cloud_leakage",
+        CorrelationCategory::PrivilegeEscalation => "privilege_escalation",
+        CorrelationCategory::DataExfiltration => "data_exfiltration",
+        CorrelationCategory::AuthBypass => "auth_bypass",
+        CorrelationCategory::LateralMovement => "lateral_movement",
+        CorrelationCategory::FinancialFraud => "financial_fraud",
+        CorrelationCategory::InfrastructurePivot => "infrastructure_pivot",
+        CorrelationCategory::ClientSide => "client_side",
+    }
+}
+
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
